@@ -1,6 +1,7 @@
 import { chainConfig } from "@morpho-blue-liquidation-bot/config";
 import { base } from "viem/chains";
-import { createPublicClient, createWalletClient, http, type Hash, type Address } from "viem";
+import { createPublicClient, createWalletClient, http, webSocket, type Hash, type Address } from "viem";
+import { analyzeMorphoPendingTx } from "./fastpath/index.js";
 import { privateKeyToAccount } from "viem/accounts";
 import { AlchemyMempoolMonitor } from "./mempool/AlchemyMempoolMonitor.js";
 import { PositionStateCache } from "./mempool/PositionStateCache.js";
@@ -51,11 +52,14 @@ class CBBTCUSDCLiquidationBot {
     this.config = chainConfig(base.id);
     
     // 创建clients
+    // Prefer WS for faster mempool; fallback to HTTP for read
+    const wsUrl = this.config.wsRpcUrl;
     this.publicClient = createPublicClient({
       chain: base,
-      transport: http(this.config.rpcUrl),
+      transport: wsUrl ? webSocket(wsUrl) : http(this.config.rpcUrl),
     });
     
+    // Use HTTP for sending tx for robustness
     this.walletClient = createWalletClient({
       chain: base,
       transport: http(this.config.rpcUrl),
@@ -243,13 +247,39 @@ class CBBTCUSDCLiquidationBot {
   
   private async handleMorphoTransaction(tx: any) {
     console.log(`🔄 Processing Morpho transaction...`);
-    
-    // 这里会实现：
-    // 1. 解析Morpho操作
-    // 2. 检查是否影响监控的市场
-    // 3. 更新position cache
-    
-    console.log(`⏳ Morpho transaction processing (implementation needed)`);
+    try {
+      const analysis = await analyzeMorphoPendingTx(
+        this.publicClient as any,
+        this.config.morpho.address as any,
+        { to: tx.to, input: tx.input },
+      );
+
+      if (!analysis || !analysis.market || !analysis.position) {
+        console.log("ℹ️ No actionable liquidation candidate from pending tx");
+        return;
+      }
+
+      const { market, position } = analysis;
+      if (position.seizableCollateral > 0n) {
+        console.log(
+          `🚨 Fast-path candidate: ${position.user} seizable=${Number(position.seizableCollateral)}`,
+        );
+        try {
+          const ok = await this.liquidationBot!.liquidateSingle(market, position as any);
+          if (ok) {
+            console.log(`✅ Fast-path liquidation sent for ${position.user}`);
+          } else {
+            console.log(`ℹ️ Fast-path liquidation skipped (not profitable)`);
+          }
+        } catch (e) {
+          console.error("❌ Fast-path liquidation error:", e);
+        }
+      } else {
+        console.log("ℹ️ Candidate not liquidatable after pending changes");
+      }
+    } catch (err) {
+      console.error("❌ Error in handleMorphoTransaction fast-path:", err);
+    }
   }
   
   // 检查仓位是否需要清算（连接到现有的清算逻辑）

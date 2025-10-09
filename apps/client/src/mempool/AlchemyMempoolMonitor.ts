@@ -12,6 +12,7 @@ export class AlchemyMempoolMonitor {
   private config: AlchemyMempoolConfig;
   private isRunning = false;
   private lastSeenTxs = new Set<Hash>();
+  private unwatch?: () => void;
   
   constructor(config: AlchemyMempoolConfig) {
     this.config = config;
@@ -21,13 +22,48 @@ export class AlchemyMempoolMonitor {
     console.log("🚀 Starting Alchemy mempool monitoring via pending block...");
     this.isRunning = true;
     
-    // 开始轮询pending块
+    // 如果支持WS，优先使用watchPendingTransactions
+    try {
+      // @ts-expect-error: viem augments client with watchPendingTransactions for WS transports
+      if (typeof this.config.client.watchPendingTransactions === "function") {
+        console.log("🔌 Using WebSocket watchPendingTransactions for mempool");
+        this.unwatch = this.config.client.watchPendingTransactions({
+          onTransactions: async (hashes: Hash[]) => {
+            for (const hash of hashes) {
+              if (this.lastSeenTxs.has(hash)) continue;
+              this.lastSeenTxs.add(hash);
+              try {
+                const tx: any = await this.config.client.getTransaction({ hash });
+                if (await this.isRelevantTransaction(tx)) {
+                  console.log(`🎯 Relevant pending tx: ${hash}`);
+                  await this.config.onPendingTransaction(hash, tx);
+                }
+              } catch {
+                // swallow
+              }
+            }
+          },
+          onError: (err: unknown) => {
+            console.error("❌ watchPendingTransactions error:", err);
+          },
+        });
+        return;
+      }
+    } catch {}
+
+    // 回退到HTTP轮询pending块
     this.pollPendingBlock();
   }
   
   stop() {
     console.log("🛑 Stopping Alchemy mempool monitoring");
     this.isRunning = false;
+    if (this.unwatch) {
+      try {
+        this.unwatch();
+      } catch {}
+      this.unwatch = undefined;
+    }
   }
   
   private async pollPendingBlock() {

@@ -117,7 +117,7 @@ export class LiquidationBot {
         encoder,
       ))
     )
-      return;
+      return false;
 
     encoder.erc20Approve(marketParams.loanToken, this.morphoAddress, maxUint256);
 
@@ -146,11 +146,13 @@ export class LiquidationBot {
         console.log(
           `${this.logTag}ℹ️ Skipped ${position.user} on ${MarketUtils.getMarketId(marketParams)} (not profitable)`,
         );
+      return success;
     } catch (error) {
       console.error(
         `${this.logTag}Failed to liquidate ${position.user} on ${MarketUtils.getMarketId(marketParams)}`,
         error,
       );
+      return false;
     }
   }
 
@@ -346,5 +348,10 @@ export class LiquidationBot {
           14,
         ),
     );
+  }
+
+  // Fast-path public method for mempool-triggered liquidation of a single position
+  async liquidateSingle(market: IMarket, position: LiquidatablePosition) {
+    return this.liquidate(market, position);
   }
 }
