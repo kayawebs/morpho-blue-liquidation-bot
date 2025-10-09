@@ -4,8 +4,8 @@ import { base } from "viem/chains";
 async function testWebSocketMempool() {
   const config = chainConfig(base.id);
   
-  // 将HTTP RPC转换为WebSocket
-  const wsUrl = config.rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+  // 优先使用配置的 WS 地址，否则从 HTTP 推断
+  const wsUrl = config.wsRpcUrl ?? config.rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
   
   console.log("🧪 Testing WebSocket mempool support...");
   console.log(`WebSocket URL: ${wsUrl}`);

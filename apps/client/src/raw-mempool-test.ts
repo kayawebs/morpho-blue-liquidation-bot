@@ -88,7 +88,7 @@ async function testRawMempoolAccess() {
   // 方法3: 尝试WebSocket订阅
   console.log("\n📡 Method 3: Testing WebSocket subscription...");
   try {
-    const wsUrl = config.rpcUrl.replace('https://', 'wss://');
+    const wsUrl = config.wsRpcUrl ?? config.rpcUrl.replace('https://', 'wss://');
     console.log(`Connecting to: ${wsUrl}`);
     
     const WebSocket = (await import('ws')).default;
