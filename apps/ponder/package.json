@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "ponder dev",
     "start": "ponder start",
+    "start:fast": "DATABASE_SCHEMA=./ponder.schema.ts ponder start",
+    "start:fast:cbBTCUSDC": "FAST_ONLY_MARKETS=0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836 DATABASE_SCHEMA=./ponder.schema.ts ponder start",
     "db": "ponder db",
     "codegen": "ponder codegen",
     "lint": "eslint . --fix",
