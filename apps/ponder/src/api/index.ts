@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, client, eq, graphql, replaceBigInts as replaceBigIntsBase } from "ponder";
+import { and, client, eq, inArray, graphql, replaceBigInts as replaceBigIntsBase } from "ponder";
 import { db, publicClients } from "ponder:api";
 import schema from "ponder:schema";
 import type { Address, Hex } from "viem";
