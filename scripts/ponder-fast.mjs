@@ -16,7 +16,12 @@ function readMarkets() {
 async function main() {
   const markets = readMarkets();
   const fast = markets.join(',');
-  const env = { ...process.env, FAST_ONLY_MARKETS: fast, DATABASE_SCHEMA: './ponder.schema.ts' };
+  const env = {
+    ...process.env,
+    FAST_ONLY_MARKETS: fast,
+    DATABASE_SCHEMA: './ponder.schema.ts',
+    FAST_LOOKBACK_BLOCKS: process.env.FAST_LOOKBACK_BLOCKS ?? '10000',
+  };
 
   console.log(`FAST_ONLY_MARKETS=${fast}`);
 
@@ -33,4 +38,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-

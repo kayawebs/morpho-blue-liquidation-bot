@@ -2,6 +2,8 @@ import { ponder } from "ponder:registry";
 import { market, position, authorization } from "ponder:schema";
 
 import { zeroFloorSub } from "./utils";
+import { readContract } from "viem/actions";
+import { morphoBlueAbi } from "../abis/MorphoBlue";
 
 const FAST_ONLY_MARKETS = (process.env.FAST_ONLY_MARKETS ?? "")
   .split(",")
@@ -31,13 +33,48 @@ ponder.on("Morpho:CreateMarket", async ({ event, context }) => {
 
 ponder.on("Morpho:SetFee", async ({ event, context }) => {
   if (!fastCheck(event.args.id)) return;
-  // Row must exist because `SetFee` cannot preceed `CreateMarket`.
-  await context.db
-    .update(market, {
-      chainId: context.chain.id,
-      id: event.args.id,
-    })
-    .set({ fee: event.args.newFee });
+  try {
+    await context.db
+      .update(market, { chainId: context.chain.id, id: event.args.id })
+      .set({ fee: event.args.newFee });
+  } catch {
+    try {
+      const [params, mview] = await Promise.all([
+        readContract(context.client as any, {
+          address: event.log.address,
+          abi: morphoBlueAbi,
+          functionName: "idToMarketParams",
+          args: [event.args.id],
+          blockNumber: event.block.number,
+        }),
+        readContract(context.client as any, {
+          address: event.log.address,
+          abi: morphoBlueAbi,
+          functionName: "market",
+          args: [event.args.id],
+          blockNumber: event.block.number,
+        }),
+      ]);
+      await context.db
+        .insert(market)
+        .values({
+          chainId: context.chain.id,
+          id: event.args.id,
+          loanToken: params.loanToken,
+          collateralToken: params.collateralToken,
+          oracle: params.oracle,
+          irm: params.irm,
+          lltv: params.lltv,
+          totalSupplyAssets: mview.totalSupplyAssets,
+          totalSupplyShares: mview.totalSupplyShares,
+          totalBorrowAssets: mview.totalBorrowAssets,
+          totalBorrowShares: mview.totalBorrowShares,
+          lastUpdate: event.block.timestamp,
+          fee: event.args.newFee,
+        })
+        .onConflictDoUpdate({ fee: event.args.newFee });
+    } catch {}
+  }
 });
 
 ponder.on("Morpho:AccrueInterest", async ({ event, context }) => {
@@ -90,13 +127,42 @@ ponder.on("Morpho:Withdraw", async ({ event, context }) => {
       totalSupplyShares: row.totalSupplyShares - event.args.shares,
     })),
     // Row must exist because `Withdraw` cannot preceed `Supply`.
-    context.db
-      .update(position, {
-        chainId: context.chain.id,
-        marketId: event.args.id,
-        user: event.args.onBehalf,
-      })
-      .set((row) => ({ supplyShares: row.supplyShares - event.args.shares })),
+    (async () => {
+      try {
+        await context.db
+          .update(position, {
+            chainId: context.chain.id,
+            marketId: event.args.id,
+            user: event.args.onBehalf,
+          })
+          .set((row) => ({ supplyShares: row.supplyShares - event.args.shares }));
+      } catch {
+        try {
+          const p = (await readContract(context.client as any, {
+            address: event.log.address,
+            abi: morphoBlueAbi,
+            functionName: "position",
+            args: [event.args.id, event.args.onBehalf],
+            blockNumber: event.block.number,
+          })) as { supplyShares: bigint; borrowShares: bigint; collateral: bigint };
+          await context.db
+            .insert(position)
+            .values({
+              chainId: context.chain.id,
+              marketId: event.args.id,
+              user: event.args.onBehalf,
+              supplyShares: p.supplyShares,
+              borrowShares: p.borrowShares,
+              collateral: p.collateral,
+            })
+            .onConflictDoUpdate((row) => ({
+              supplyShares: p.supplyShares,
+              borrowShares: p.borrowShares,
+              collateral: p.collateral,
+            }));
+        } catch {}
+      }
+    })(),
   ]);
 });
 
@@ -120,14 +186,40 @@ ponder.on("Morpho:SupplyCollateral", async ({ event, context }) => {
 
 ponder.on("Morpho:WithdrawCollateral", async ({ event, context }) => {
   if (!fastCheck(event.args.id)) return;
-  // Row must exist because `WithdrawCollateral` cannot preceed `SupplyCollateral`.
-  await context.db
-    .update(position, {
-      chainId: context.chain.id,
-      marketId: event.args.id,
-      user: event.args.onBehalf,
-    })
-    .set((row) => ({ collateral: row.collateral - event.args.assets }));
+  try {
+    await context.db
+      .update(position, {
+        chainId: context.chain.id,
+        marketId: event.args.id,
+        user: event.args.onBehalf,
+      })
+      .set((row) => ({ collateral: row.collateral - event.args.assets }));
+  } catch {
+    try {
+      const p = (await readContract(context.client as any, {
+        address: event.log.address,
+        abi: morphoBlueAbi,
+        functionName: "position",
+        args: [event.args.id, event.args.onBehalf],
+        blockNumber: event.block.number,
+      })) as { supplyShares: bigint; borrowShares: bigint; collateral: bigint };
+      await context.db
+        .insert(position)
+        .values({
+          chainId: context.chain.id,
+          marketId: event.args.id,
+          user: event.args.onBehalf,
+          supplyShares: p.supplyShares,
+          borrowShares: p.borrowShares,
+          collateral: p.collateral,
+        })
+        .onConflictDoUpdate((row) => ({
+          supplyShares: p.supplyShares,
+          borrowShares: p.borrowShares,
+          collateral: p.collateral,
+        }));
+    } catch {}
+  }
 });
 
 ponder.on("Morpho:Borrow", async ({ event, context }) => {
@@ -158,13 +250,42 @@ ponder.on("Morpho:Repay", async ({ event, context }) => {
       totalBorrowShares: row.totalBorrowShares - event.args.shares,
     })),
     // Row must exist because `Repay` cannot preceed `SupplyCollateral`.
-    context.db
-      .update(position, {
-        chainId: context.chain.id,
-        marketId: event.args.id,
-        user: event.args.onBehalf,
-      })
-      .set((row) => ({ borrowShares: row.borrowShares - event.args.shares })),
+    (async () => {
+      try {
+        await context.db
+          .update(position, {
+            chainId: context.chain.id,
+            marketId: event.args.id,
+            user: event.args.onBehalf,
+          })
+          .set((row) => ({ borrowShares: row.borrowShares - event.args.shares }));
+      } catch {
+        try {
+          const p = (await readContract(context.client as any, {
+            address: event.log.address,
+            abi: morphoBlueAbi,
+            functionName: "position",
+            args: [event.args.id, event.args.onBehalf],
+            blockNumber: event.block.number,
+          })) as { supplyShares: bigint; borrowShares: bigint; collateral: bigint };
+          await context.db
+            .insert(position)
+            .values({
+              chainId: context.chain.id,
+              marketId: event.args.id,
+              user: event.args.onBehalf,
+              supplyShares: p.supplyShares,
+              borrowShares: p.borrowShares,
+              collateral: p.collateral,
+            })
+            .onConflictDoUpdate((row) => ({
+              supplyShares: p.supplyShares,
+              borrowShares: p.borrowShares,
+              collateral: p.collateral,
+            }));
+        } catch {}
+      }
+    })(),
   ]);
 });
 
@@ -181,17 +302,45 @@ ponder.on("Morpho:Liquidate", async ({ event, context }) => {
       ),
       totalBorrowShares: row.totalBorrowShares - event.args.repaidShares - event.args.badDebtShares,
     })),
-    // Row must exist because `Liquidate` cannot preceed `SupplyCollateral`.
-    context.db
-      .update(position, {
-        chainId: context.chain.id,
-        marketId: event.args.id,
-        user: event.args.borrower,
-      })
-      .set((row) => ({
-        collateral: row.collateral - event.args.seizedAssets,
-        borrowShares: row.borrowShares - event.args.repaidShares - event.args.badDebtShares,
-      })),
+    (async () => {
+      try {
+        await context.db
+          .update(position, {
+            chainId: context.chain.id,
+            marketId: event.args.id,
+            user: event.args.borrower,
+          })
+          .set((row) => ({
+            collateral: row.collateral - event.args.seizedAssets,
+            borrowShares: row.borrowShares - event.args.repaidShares - event.args.badDebtShares,
+          }));
+      } catch {
+        try {
+          const p = (await readContract(context.client as any, {
+            address: event.log.address,
+            abi: morphoBlueAbi,
+            functionName: "position",
+            args: [event.args.id, event.args.borrower],
+            blockNumber: event.block.number,
+          })) as { supplyShares: bigint; borrowShares: bigint; collateral: bigint };
+          await context.db
+            .insert(position)
+            .values({
+              chainId: context.chain.id,
+              marketId: event.args.id,
+              user: event.args.borrower,
+              supplyShares: p.supplyShares,
+              borrowShares: p.borrowShares,
+              collateral: p.collateral,
+            })
+            .onConflictDoUpdate((row) => ({
+              supplyShares: p.supplyShares,
+              borrowShares: p.borrowShares,
+              collateral: p.collateral,
+            }));
+        } catch {}
+      }
+    })(),
   ]);
 });
 
