@@ -7,7 +7,8 @@
     "build:config": "pnpm --filter @morpho-blue-liquidation-bot/config build",
     "ponder:dev": "pnpm --filter @morpho-blue-liquidation-bot/ponder dev",
     "cbbtc:start": "pnpm build:config && tsx apps/client/src/cbbtc-usdt-bot.ts --env-file=.env",
-    "dev": "pnpm build:config && concurrently \"pnpm --filter @morpho-blue-liquidation-bot/ponder dev\" \"pnpm cbbtc:start\""
+    "dev": "pnpm build:config && concurrently \"pnpm --filter @morpho-blue-liquidation-bot/ponder dev\" \"pnpm cbbtc:start\"",
+    "worker:base:cbbtc_usdc": "pnpm build:config && tsx apps/workers/base_cbbtc_usdc.ts --env-file=.env"
   },
   "lint-staged": {
     "*.ts": [

@@ -1,4 +1,5 @@
 import type { Client, Transport, Chain, Account, Hash, Address, Hex } from "viem";
+import { watchPendingTransactions, getTransaction } from "viem/actions";
 
 export interface AlchemyMempoolConfig {
   client: Client<Transport, Chain, Account>;
@@ -13,6 +14,7 @@ export class AlchemyMempoolMonitor {
   private isRunning = false;
   private lastSeenTxs = new Set<Hash>();
   private unwatch?: () => void;
+  private usingWs = false;
   
   constructor(config: AlchemyMempoolConfig) {
     this.config = config;
@@ -22,18 +24,19 @@ export class AlchemyMempoolMonitor {
     console.log("🚀 Starting Alchemy mempool monitoring via pending block...");
     this.isRunning = true;
     
-    // 如果支持WS，优先使用watchPendingTransactions
+    // 如果是 WS transport，优先使用 watchPendingTransactions
     try {
-      // @ts-expect-error: viem augments client with watchPendingTransactions for WS transports
-      if (typeof this.config.client.watchPendingTransactions === "function") {
+      // @ts-expect-error - narrow transport type at runtime
+      if (this.config.client.transport?.type === "webSocket") {
         console.log("🔌 Using WebSocket watchPendingTransactions for mempool");
-        this.unwatch = this.config.client.watchPendingTransactions({
+        this.usingWs = true;
+        this.unwatch = watchPendingTransactions(this.config.client as any, {
           onTransactions: async (hashes: Hash[]) => {
             for (const hash of hashes) {
               if (this.lastSeenTxs.has(hash)) continue;
               this.lastSeenTxs.add(hash);
               try {
-                const tx: any = await this.config.client.getTransaction({ hash });
+                const tx: any = await getTransaction(this.config.client as any, { hash });
                 if (await this.isRelevantTransaction(tx)) {
                   console.log(`🎯 Relevant pending tx: ${hash}`);
                   await this.config.onPendingTransaction(hash, tx);
@@ -47,6 +50,18 @@ export class AlchemyMempoolMonitor {
             console.error("❌ watchPendingTransactions error:", err);
           },
         });
+        // If no events after 20s, fallback to HTTP polling
+        setTimeout(() => {
+          if (!this.isRunning) return;
+          if (this.usingWs && this.lastSeenTxs.size === 0) {
+            console.warn("⚠️  No WS pending events after 20s, falling back to HTTP polling");
+            try {
+              if (this.unwatch) this.unwatch();
+            } catch {}
+            this.usingWs = false;
+            this.pollPendingBlock();
+          }
+        }, 20_000);
         return;
       }
     } catch {}
@@ -64,6 +79,7 @@ export class AlchemyMempoolMonitor {
       } catch {}
       this.unwatch = undefined;
     }
+    this.usingWs = false;
   }
   
   private async pollPendingBlock() {

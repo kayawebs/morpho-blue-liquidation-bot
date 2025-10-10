@@ -8,6 +8,7 @@ import { PositionStateCache } from "./mempool/PositionStateCache.js";
 import { BackrunStrategy } from "./mempool/BackrunStrategy.js";
 import { LiquidationBot } from "./bot.js";
 import { BaseChainlinkPricer } from "./pricers/baseChainlink/index.js";
+import { tryDecodeOcrTransmitPrice } from "./oracle-ocr/index.js";
 import { fetchLiquidatablePositions } from "./utils/fetchers.js";
 import { UniswapV3Venue } from "./liquidityVenues/uniswapV3/index.js";
 
@@ -212,8 +213,13 @@ class CBBTCUSDCLiquidationBot {
     console.log(`📈 Processing oracle price update...`);
     
     try {
-      // 1. 获取新的cbBTC/USDC价格
-      const newPrice = await this.basePricer.getCbBtcUsdcPrice(this.publicClient);
+      // 0. 如果能够从 pending 交易中解出 OCR 报告，优先使用预测价格
+      let newPrice = await tryDecodeOcrTransmitPrice(tx.input as any);
+
+      // 1. 否则读取最新已确认价格
+      if (newPrice === undefined) {
+        newPrice = await this.basePricer.getCbBtcUsdcPrice(this.publicClient);
+      }
       if (!newPrice) {
         console.warn(`⚠️ Failed to get new cbBTC/USDC price after oracle update`);
         return;

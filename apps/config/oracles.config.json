@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "chains": {
+    "8453": {
+      "name": "base",
+      "oracles": {
+        "cbBTC_USDC": {
+          "address": "0x663BECd10daE6C4A3Dcd89F1d76c1174199639B9",
+          "variant": "chainlink_ocr2",
+          "typeAndVersion": "FILL_ME (e.g. OCR2Aggregator 0.0.3)",
+          "answerDecimals": "FILL_ME_INT (e.g. 8)",
+          "transmitMethod": "transmit(bytes,bytes32[],bytes32[],bytes)",
+          "sampleTransmitTx": "FILL_ME_TX_HASH",
+          "description": "cbBTC/USDC composite on Base"
+        },
+        "BTC_USD": {
+          "address": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
+          "variant": "chainlink_ocr2 | chainlink_acoa | v2v3 | custom",
+          "typeAndVersion": "FILL_ME",
+          "answerDecimals": "FILL_ME_INT",
+          "transmitMethod": "FILL_ME (if custom/ACOA)",
+          "sampleTransmitTx": "FILL_ME_TX_HASH",
+          "description": "BTC/USD on Base"
+        },
+        "USDC_USD": {
+          "address": "0x7e860098F58bBFC8648a4311b374B1D669a2bc6B",
+          "variant": "chainlink_ocr2 | chainlink_acoa | v2v3 | custom",
+          "typeAndVersion": "FILL_ME",
+          "answerDecimals": "FILL_ME_INT",
+          "transmitMethod": "FILL_ME",
+          "sampleTransmitTx": "FILL_ME_TX_HASH",
+          "description": "USDC/USD on Base"
+        },
+        "ETH_USD": {
+          "address": "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
+          "variant": "chainlink_ocr2 | chainlink_acoa | v2v3 | custom",
+          "typeAndVersion": "FILL_ME",
+          "answerDecimals": "FILL_ME_INT",
+          "transmitMethod": "FILL_ME",
+          "sampleTransmitTx": "FILL_ME_TX_HASH",
+          "description": "ETH/USD on Base"
+        }
+      },
+      "markets": [
+        {
+          "marketId": "0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836",
+          "loanToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "collateralToken": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+          "priceOracleKey": "cbBTC_USDC",
+          "fallbackOracles": [
+            "BTC_USD",
+            "USDC_USD"
+          ],
+          "monitor": true,
+          "notes": "cbBTC/USDC on Base"
+        }
+      ],
+      "watchAggregators": [
+        "cbBTC_USDC",
+        "BTC_USD",
+        "USDC_USD",
+        "ETH_USD"
+      ]
+    }
+  }
+}
