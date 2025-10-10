@@ -133,19 +133,19 @@ ponder.on("Morpho:WithdrawCollateral", async ({ event, context }) => {
 ponder.on("Morpho:Borrow", async ({ event, context }) => {
   if (!fastCheck(event.args.id)) return;
   await Promise.all([
-    // Row must exist because `Borrow` cannot preceed `CreateMarket`.
     context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
       totalBorrowAssets: row.totalBorrowAssets + event.args.assets,
       totalBorrowShares: row.totalBorrowShares + event.args.shares,
     })),
-    // Row must exist because `Borrow` cannot preceed `SupplyCollateral`.
     context.db
-      .update(position, {
+      .insert(position)
+      .values({
         chainId: context.chain.id,
         marketId: event.args.id,
         user: event.args.onBehalf,
+        borrowShares: event.args.shares,
       })
-      .set((row) => ({ borrowShares: row.borrowShares + event.args.shares })),
+      .onConflictDoUpdate((row) => ({ borrowShares: row.borrowShares + event.args.shares })),
   ]);
 });
 
