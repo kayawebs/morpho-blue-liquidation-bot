@@ -16,6 +16,9 @@ import { tryDecodeOcr2AnswerFromInput } from "../client/src/oracle-ocr/decoder.j
 import { LiquidationBot } from "../client/src/bot.js";
 import { UniswapV3Venue } from "../client/src/liquidityVenues/uniswapV3/index.js";
 import { BaseChainlinkPricer } from "../client/src/pricers/baseChainlink/index.js";
+import { AccrualPosition, Market, MarketParams, type IAccrualPosition } from "@morpho-org/blue-sdk";
+import { readContract } from "viem/actions";
+import { morphoBlueAbi } from "../ponder/abis/MorphoBlue.js";
 
 // Hard-coded market configuration for Base cbBTC/USDC
 // Fill the FILL_ME_* fields for full OCR fast-path support.
@@ -93,6 +96,79 @@ async function main() {
     pricers: [basePricer],
   });
 
+  // Ponder candidates wiring
+  const PONDER_API_URL = process.env.PONDER_SERVICE_URL ?? "http://localhost:42069";
+  const CANDIDATE_REFRESH_MS = Number(process.env.CANDIDATE_REFRESH_MS ?? 60_000);
+  const CANDIDATE_BATCH = Number(process.env.CANDIDATE_BATCH ?? 50);
+  let candidates: Address[] = [];
+  let marketParamsCache: any | undefined;
+  let nextIdx = 0;
+
+  async function fetchCandidates(): Promise<void> {
+    try {
+      const res = await fetch(new URL(`/chain/${MARKET.chainId}/candidates`, PONDER_API_URL), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ marketIds: [MARKET.marketId] }),
+      });
+      if (!res.ok) {
+        console.warn(`⚠️ candidates fetch failed: ${res.status} ${res.statusText}`);
+        return;
+      }
+      const data = (await res.json()) as Record<string, Address[]>;
+      candidates = data[MARKET.marketId] ?? [];
+      console.log(`👥 Candidates loaded: ${candidates.length}`);
+    } catch (e) {
+      console.warn("⚠️ candidates fetch error:", e);
+    }
+  }
+
+  async function getMarketParams() {
+    if (marketParamsCache) return marketParamsCache;
+    marketParamsCache = await readContract(publicClient as any, {
+      address: MARKET.morphoAddress,
+      abi: morphoBlueAbi,
+      functionName: "idToMarketParams",
+      args: [MARKET.marketId],
+    });
+    return marketParamsCache;
+  }
+
+  async function getMarketView() {
+    return (await readContract(publicClient as any, {
+      address: MARKET.morphoAddress,
+      abi: morphoBlueAbi,
+      functionName: "market",
+      args: [MARKET.marketId],
+    })) as {
+      totalSupplyAssets: bigint;
+      totalSupplyShares: bigint;
+      totalBorrowAssets: bigint;
+      totalBorrowShares: bigint;
+      lastUpdate: bigint;
+      fee: bigint;
+    };
+  }
+
+  async function getUserPosition(user: Address) {
+    return (await readContract(publicClient as any, {
+      address: MARKET.morphoAddress,
+      abi: morphoBlueAbi,
+      functionName: "position",
+      args: [MARKET.marketId, user],
+    })) as { supplyShares: bigint; borrowShares: bigint; collateral: bigint };
+  }
+
+  function pickBatch(): Address[] {
+    if (candidates.length === 0) return [];
+    const out: Address[] = [];
+    for (let i = 0; i < CANDIDATE_BATCH && i < candidates.length; i++) {
+      out.push(candidates[(nextIdx + i) % candidates.length]!);
+    }
+    nextIdx = (nextIdx + CANDIDATE_BATCH) % Math.max(1, candidates.length);
+    return out;
+  }
+
   // Build watchlist: only Morpho + underlying feeds
   const watchAddresses = new Set<Address>([
     MARKET.morphoAddress,
@@ -137,14 +213,51 @@ async function main() {
           const predictedPrice = MARKET.scaleFactor * answer; // 1e36-scaled as per oracle contract
           console.log(`💡 Predicted cbBTC/USDC price (1e36): ${predictedPrice.toString()}`);
 
-          // TODO: With predictedPrice, recompute target market candidate positions and liquidate if profitable.
-          // For now, rely on Morpho fast-path (borrow/withdraw) while OCR execution path is being finalized.
+          // With predictedPrice, recompute target market candidate positions and liquidate if profitable.
+          const [params, view] = await Promise.all([getMarketParams(), getMarketView()]);
+          const marketObj = new Market({
+            chainId: MARKET.chainId,
+            id: MARKET.marketId as any,
+            params: new MarketParams(params),
+            price: predictedPrice,
+            totalSupplyAssets: view.totalSupplyAssets,
+            totalSupplyShares: view.totalSupplyShares,
+            totalBorrowAssets: view.totalBorrowAssets,
+            totalBorrowShares: view.totalBorrowShares,
+            lastUpdate: view.lastUpdate,
+            fee: view.fee,
+          }).accrueInterest(Math.floor(Date.now() / 1000).toString());
+
+          const batch = pickBatch();
+          for (const user of batch) {
+            try {
+              const p = await getUserPosition(user);
+              if (p.borrowShares === 0n) continue;
+              const iposition: IAccrualPosition = {
+                chainId: MARKET.chainId,
+                marketId: MARKET.marketId as any,
+                user,
+                supplyShares: p.supplyShares,
+                borrowShares: p.borrowShares,
+                collateral: p.collateral,
+              };
+              const seizable = new AccrualPosition(iposition, marketObj).seizableCollateral ?? 0n;
+              if (seizable > 0n) {
+                console.log(`🎯 Candidate liquidatable: ${user} seizable=${seizable.toString()}`);
+                await liquidator.liquidateSingle(marketObj, { ...iposition, seizableCollateral: seizable } as any);
+              }
+            } catch {}
+          }
         }
       } catch (err) {
         console.error("❌ Worker error handling pending tx:", err);
       }
     },
   });
+
+  // Initial candidates fetch + schedule refresh
+  await fetchCandidates();
+  setInterval(fetchCandidates, CANDIDATE_REFRESH_MS);
 
   await monitor.start();
   console.log("✅ Worker running. Listening for Morpho & Oracle pending tx...");
