@@ -3,7 +3,15 @@ import { market, position, authorization } from "ponder:schema";
 
 import { zeroFloorSub } from "./utils";
 
+const FAST_ONLY_MARKETS = (process.env.FAST_ONLY_MARKETS ?? "")
+  .split(",")
+  .map((x) => x.trim().toLowerCase())
+  .filter(Boolean);
+const fastCheck = (id: `0x${string}`) =>
+  FAST_ONLY_MARKETS.length === 0 || FAST_ONLY_MARKETS.includes(id.toLowerCase());
+
 ponder.on("Morpho:CreateMarket", async ({ event, context }) => {
+  if (!fastCheck(event.args.id)) return;
   // `CreateMarket` can only fire once for a given `{ chainId, id }`,
   // so we can insert without any `onConflict` handling.
   await context.db.insert(market).values({
@@ -22,6 +30,7 @@ ponder.on("Morpho:CreateMarket", async ({ event, context }) => {
 });
 
 ponder.on("Morpho:SetFee", async ({ event, context }) => {
+  if (!fastCheck(event.args.id)) return;
   // Row must exist because `SetFee` cannot preceed `CreateMarket`.
   await context.db
     .update(market, {
@@ -32,6 +41,7 @@ ponder.on("Morpho:SetFee", async ({ event, context }) => {
 });
 
 ponder.on("Morpho:AccrueInterest", async ({ event, context }) => {
+  if (!fastCheck(event.args.id)) return;
   // Row must exist because `AccrueInterest` cannot preceed `CreateMarket`.
   await context.db
     .update(market, {
@@ -47,6 +57,7 @@ ponder.on("Morpho:AccrueInterest", async ({ event, context }) => {
 });
 
 ponder.on("Morpho:Supply", async ({ event, context }) => {
+  if (!fastCheck(event.args.id)) return;
   await Promise.all([
     // Row must exist because `Supply` cannot preceed `CreateMarket`.
     context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
@@ -71,6 +82,7 @@ ponder.on("Morpho:Supply", async ({ event, context }) => {
 });
 
 ponder.on("Morpho:Withdraw", async ({ event, context }) => {
+  if (!fastCheck(event.args.id)) return;
   await Promise.all([
     // Row must exist because `Withdraw` cannot preceed `CreateMarket`.
     context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
@@ -89,6 +101,7 @@ ponder.on("Morpho:Withdraw", async ({ event, context }) => {
 });
 
 ponder.on("Morpho:SupplyCollateral", async ({ event, context }) => {
+  if (!fastCheck(event.args.id)) return;
   // Row may or may not exist because `SupplyCollateral` could be `user`'s first action.
   await context.db
     .insert(position)
@@ -106,6 +119,7 @@ ponder.on("Morpho:SupplyCollateral", async ({ event, context }) => {
 });
 
 ponder.on("Morpho:WithdrawCollateral", async ({ event, context }) => {
+  if (!fastCheck(event.args.id)) return;
   // Row must exist because `WithdrawCollateral` cannot preceed `SupplyCollateral`.
   await context.db
     .update(position, {
@@ -117,6 +131,7 @@ ponder.on("Morpho:WithdrawCollateral", async ({ event, context }) => {
 });
 
 ponder.on("Morpho:Borrow", async ({ event, context }) => {
+  if (!fastCheck(event.args.id)) return;
   await Promise.all([
     // Row must exist because `Borrow` cannot preceed `CreateMarket`.
     context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
@@ -135,6 +150,7 @@ ponder.on("Morpho:Borrow", async ({ event, context }) => {
 });
 
 ponder.on("Morpho:Repay", async ({ event, context }) => {
+  if (!fastCheck(event.args.id)) return;
   await Promise.all([
     // Row must exist because `Repay` cannot preceed `CreateMarket`.
     context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
@@ -153,6 +169,7 @@ ponder.on("Morpho:Repay", async ({ event, context }) => {
 });
 
 ponder.on("Morpho:Liquidate", async ({ event, context }) => {
+  if (!fastCheck(event.args.id)) return;
   await Promise.all([
     // Row must exist because `Liquidate` cannot preceed `CreateMarket`.
     context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
