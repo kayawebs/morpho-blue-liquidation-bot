@@ -6,7 +6,7 @@ export const OCR2_AGGREGATOR_ABI = [
       { name: "report", type: "bytes" },
       { name: "rawRs", type: "bytes32[]" },
       { name: "rawSs", type: "bytes32[]" },
-      { name: "rawVs", type: "bytes" },
+      { name: "rawVs", type: "bytes32" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -29,4 +29,3 @@ export const ACOA_AGGREGATOR_ABI = [
     stateMutability: "nonpayable",
   },
 ] as const;
-
