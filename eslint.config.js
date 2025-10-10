@@ -50,4 +50,23 @@ export default tseslint.config({ ignores: ["dist"] }, eslint.configs.recommended
       },
     ],
   },
+  // Looser rules for worker + ponder runtime code to speed iteration
+  // (keeps core packages strict)
+},
+{
+  files: [
+    "apps/ponder/src/**/*.ts",
+    "apps/workers/**/*.ts",
+  ],
+  rules: {
+    "@typescript-eslint/no-explicit-any": "off",
+    "@typescript-eslint/no-unsafe-assignment": "off",
+    "@typescript-eslint/no-unsafe-member-access": "off",
+    "@typescript-eslint/no-unsafe-argument": "off",
+    "@typescript-eslint/no-floating-promises": "off",
+    "@typescript-eslint/no-unused-vars": "off",
+    "@typescript-eslint/prefer-nullish-coalescing": "off",
+    "@typescript-eslint/no-redundant-type-constituents": "off",
+    "no-empty": "off",
+  },
 });

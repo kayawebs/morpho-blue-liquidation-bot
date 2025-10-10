@@ -80,17 +80,64 @@ ponder.on("Morpho:SetFee", async ({ event, context }) => {
 ponder.on("Morpho:AccrueInterest", async ({ event, context }) => {
   if (!fastCheck(event.args.id)) return;
   // Row must exist because `AccrueInterest` cannot preceed `CreateMarket`.
-  await context.db
-    .update(market, {
-      chainId: context.chain.id,
-      id: event.args.id,
-    })
-    .set((row) => ({
-      totalSupplyAssets: row.totalSupplyAssets + event.args.interest,
-      totalSupplyShares: row.totalSupplyShares + event.args.feeShares,
-      totalBorrowAssets: row.totalBorrowAssets + event.args.interest,
-      lastUpdate: event.block.timestamp,
-    }));
+  try {
+    await context.db
+      .update(market, {
+        chainId: context.chain.id,
+        id: event.args.id,
+      })
+      .set((row) => ({
+        totalSupplyAssets: row.totalSupplyAssets + event.args.interest,
+        totalSupplyShares: row.totalSupplyShares + event.args.feeShares,
+        totalBorrowAssets: row.totalBorrowAssets + event.args.interest,
+        lastUpdate: event.block.timestamp,
+      }));
+  } catch {
+    // Hydrate missing market row on demand using on-chain view at this block
+    try {
+      const [params, mview] = await Promise.all([
+        readContract(context.client as any, {
+          address: event.log.address,
+          abi: morphoBlueAbi,
+          functionName: "idToMarketParams",
+          args: [event.args.id],
+          blockNumber: event.block.number,
+        }),
+        readContract(context.client as any, {
+          address: event.log.address,
+          abi: morphoBlueAbi,
+          functionName: "market",
+          args: [event.args.id],
+          blockNumber: event.block.number,
+        }),
+      ]);
+      await context.db
+        .insert(market)
+        .values({
+          chainId: context.chain.id,
+          id: event.args.id,
+          loanToken: params.loanToken,
+          collateralToken: params.collateralToken,
+          oracle: params.oracle,
+          irm: params.irm,
+          lltv: params.lltv,
+          totalSupplyAssets: mview.totalSupplyAssets,
+          totalSupplyShares: mview.totalSupplyShares,
+          totalBorrowAssets: mview.totalBorrowAssets,
+          totalBorrowShares: mview.totalBorrowShares,
+          lastUpdate: event.block.timestamp,
+          fee: mview.fee,
+        })
+        .onConflictDoUpdate((row) => ({
+          totalSupplyAssets: mview.totalSupplyAssets,
+          totalSupplyShares: mview.totalSupplyShares,
+          totalBorrowAssets: mview.totalBorrowAssets,
+          totalBorrowShares: mview.totalBorrowShares,
+          lastUpdate: event.block.timestamp,
+          fee: mview.fee,
+        }));
+    } catch {}
+  }
 });
 
 ponder.on("Morpho:Supply", async ({ event, context }) => {

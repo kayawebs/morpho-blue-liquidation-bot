@@ -2,9 +2,12 @@ module.exports = {
   apps: [
     {
       name: 'ponder-indexer',
-      script: 'node',
-      args: 'scripts/ponder-fast.mjs',
+      script: 'pnpm',
+      args: 'ponder:start',
       cwd: './',
+      env: {
+        FAST_LOOKBACK_BLOCKS: '10000'
+      },
       restart_delay: 5000,
       max_restarts: 10,
       log_file: './logs/ponder.log',
