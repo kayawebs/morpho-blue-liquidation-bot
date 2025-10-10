@@ -16,11 +16,7 @@ module.exports = {
       script: 'pnpm',
       args: 'worker:base:cbbtc_usdc',
       cwd: './',
-      env: {
-        CANDIDATE_SOURCE: 'logs',
-        CANDIDATE_LOGS_LOOKBACK_BLOCKS: '10000',
-        CANDIDATE_LOGS_CHUNK: '2000'
-      },
+      env: {},
       restart_delay: 3000,
       max_restarts: 10,
       log_file: './logs/worker.log',

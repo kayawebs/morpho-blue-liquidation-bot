@@ -1,6 +1,6 @@
 import { chainConfig, chainConfigs } from "@morpho-blue-liquidation-bot/config";
 import { createConfig, factory } from "ponder";
-import { type AbiEvent, getAbiItem } from "viem";
+import { type AbiEvent, getAbiItem, createPublicClient, http } from "viem";
 
 import { adaptiveCurveIrmAbi } from "./abis/AdaptiveCurveIrm";
 import { metaMorphoAbi } from "./abis/MetaMorpho";
@@ -9,6 +9,19 @@ import { morphoBlueAbi } from "./abis/MorphoBlue";
 import { preLiquidationFactoryAbi } from "./abis/PreLiquidationFactory";
 
 const configs = Object.values(chainConfigs).map((config) => chainConfig(config.chain.id));
+
+// Optional fast-lookback override to reduce initial history scanned.
+const LOOKBACK = Number(process.env.FAST_LOOKBACK_BLOCKS ?? "0");
+const latestByChain: Record<string, number> = {};
+if (LOOKBACK > 0) {
+  for (const cfg of configs) {
+    const client = createPublicClient({ chain: cfg.chain, transport: http(cfg.rpcUrl) });
+    const latest = await client.getBlockNumber();
+    latestByChain[cfg.chain.name] = Number(latest);
+  }
+}
+const sb = (chainName: string, orig: number) =>
+  LOOKBACK > 0 ? Math.max(orig, (latestByChain[chainName] ?? orig) - LOOKBACK) : orig;
 
 const chains = Object.fromEntries(
   configs.map((config) => [
@@ -31,7 +44,7 @@ export default createConfig({
           config.chain.name,
           {
             address: config.morpho.address,
-            startBlock: config.morpho.startBlock,
+            startBlock: sb(config.chain.name, config.morpho.startBlock),
           },
         ]),
       ) as Record<
@@ -53,7 +66,7 @@ export default createConfig({
               event: getAbiItem({ abi: metaMorphoFactoryAbi, name: "CreateMetaMorpho" }),
               parameter: "metaMorpho",
             }),
-            startBlock: config.metaMorphoFactories.startBlock,
+            startBlock: sb(config.chain.name, config.metaMorphoFactories.startBlock),
           },
         ]),
       ) as Record<
@@ -76,7 +89,7 @@ export default createConfig({
           config.chain.name,
           {
             address: config.adaptiveCurveIrm.address,
-            startBlock: config.adaptiveCurveIrm.startBlock,
+            startBlock: sb(config.chain.name, config.adaptiveCurveIrm.startBlock),
           },
         ]),
       ) as Record<
@@ -94,7 +107,7 @@ export default createConfig({
           config.chain.name,
           {
             address: config.preLiquidationFactory.address,
-            startBlock: config.preLiquidationFactory.startBlock,
+            startBlock: sb(config.chain.name, config.preLiquidationFactory.startBlock),
           },
         ]),
       ) as Record<

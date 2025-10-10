@@ -101,7 +101,7 @@ async function main() {
   const PONDER_API_URL = process.env.PONDER_SERVICE_URL ?? "http://localhost:42069";
   const CANDIDATE_REFRESH_MS = Number(process.env.CANDIDATE_REFRESH_MS ?? 60_000);
   const CANDIDATE_BATCH = Number(process.env.CANDIDATE_BATCH ?? 50);
-  const CANDIDATE_SOURCE = (process.env.CANDIDATE_SOURCE ?? "logs").toLowerCase();
+  const CANDIDATE_SOURCE = (process.env.CANDIDATE_SOURCE ?? "ponder").toLowerCase();
   const CANDIDATE_LOGS_LOOKBACK = BigInt(process.env.CANDIDATE_LOGS_LOOKBACK_BLOCKS ?? "10000");
   const CANDIDATE_LOGS_CHUNK = BigInt(process.env.CANDIDATE_LOGS_CHUNK ?? "2000");
   let candidates: Address[] = [];
