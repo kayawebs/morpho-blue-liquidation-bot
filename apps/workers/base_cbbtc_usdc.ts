@@ -7,6 +7,7 @@ import {
   webSocket,
   type Hash,
   type Address,
+  getAbiItem,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -100,27 +101,87 @@ async function main() {
   const PONDER_API_URL = process.env.PONDER_SERVICE_URL ?? "http://localhost:42069";
   const CANDIDATE_REFRESH_MS = Number(process.env.CANDIDATE_REFRESH_MS ?? 60_000);
   const CANDIDATE_BATCH = Number(process.env.CANDIDATE_BATCH ?? 50);
+  const CANDIDATE_SOURCE = (process.env.CANDIDATE_SOURCE ?? "logs").toLowerCase();
+  const CANDIDATE_LOGS_LOOKBACK = BigInt(process.env.CANDIDATE_LOGS_LOOKBACK_BLOCKS ?? "10000");
+  const CANDIDATE_LOGS_CHUNK = BigInt(process.env.CANDIDATE_LOGS_CHUNK ?? "2000");
   let candidates: Address[] = [];
+  const candidateSet = new Set<string>();
   let marketParamsCache: any | undefined;
   let nextIdx = 0;
 
   async function fetchCandidates(): Promise<void> {
     try {
-      const res = await fetch(new URL(`/chain/${MARKET.chainId}/candidates`, PONDER_API_URL), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ marketIds: [MARKET.marketId] }),
-      });
-      if (!res.ok) {
-        console.warn(`⚠️ candidates fetch failed: ${res.status} ${res.statusText}`);
-        return;
+      if (CANDIDATE_SOURCE === "ponder") {
+        const res = await fetch(new URL(`/chain/${MARKET.chainId}/candidates`, PONDER_API_URL), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ marketIds: [MARKET.marketId] }),
+        });
+        if (!res.ok) {
+          console.warn(`⚠️ candidates fetch failed: ${res.status} ${res.statusText}`);
+        } else {
+          const data = (await res.json()) as Record<string, Address[]>;
+          const list = data[MARKET.marketId] ?? [];
+          for (const u of list) candidateSet.add(u.toLowerCase());
+        }
+      } else {
+        await hydrateCandidatesFromLogs();
       }
-      const data = (await res.json()) as Record<string, Address[]>;
-      candidates = data[MARKET.marketId] ?? [];
-      console.log(`👥 Candidates loaded: ${candidates.length}`);
+      candidates = [...candidateSet] as Address[];
+      console.log(`👥 Candidates loaded: ${candidates.length} (source=${CANDIDATE_SOURCE})`);
     } catch (e) {
       console.warn("⚠️ candidates fetch error:", e);
     }
+  }
+
+  async function hydrateCandidatesFromLogs() {
+    const head = await publicClient.getBlockNumber();
+    const fromBlock = head > CANDIDATE_LOGS_LOOKBACK ? head - CANDIDATE_LOGS_LOOKBACK : 0n;
+    const borrowEvent = getAbiItem({ abi: morphoBlueAbi, name: "Borrow" }) as any;
+    const supplyColEvent = getAbiItem({ abi: morphoBlueAbi, name: "SupplyCollateral" }) as any;
+    const step = CANDIDATE_LOGS_CHUNK;
+    for (let start = fromBlock; start <= head; start += step) {
+      const end = start + step - 1n > head ? head : start + step - 1n;
+      try {
+        const [borrows, supplies] = await Promise.all([
+          publicClient.getLogs({
+            address: MARKET.morphoAddress,
+            event: borrowEvent,
+            args: { id: MARKET.marketId as any },
+            fromBlock: start,
+            toBlock: end,
+          } as any),
+          publicClient.getLogs({
+            address: MARKET.morphoAddress,
+            event: supplyColEvent,
+            args: { id: MARKET.marketId as any },
+            fromBlock: start,
+            toBlock: end,
+          } as any),
+        ]);
+        for (const log of borrows as any[]) candidateSet.add((log.args.onBehalf as string).toLowerCase());
+        for (const log of supplies as any[]) candidateSet.add((log.args.onBehalf as string).toLowerCase());
+      } catch {}
+    }
+    // Live updates: confirmed logs watcher to grow set incrementally
+    try {
+      publicClient.watchEvent({
+        address: MARKET.morphoAddress,
+        event: borrowEvent,
+        args: { id: MARKET.marketId as any },
+        onLogs: (logs: any[]) => {
+          for (const l of logs) candidateSet.add((l.args.onBehalf as string).toLowerCase());
+        },
+      } as any);
+      publicClient.watchEvent({
+        address: MARKET.morphoAddress,
+        event: supplyColEvent,
+        args: { id: MARKET.marketId as any },
+        onLogs: (logs: any[]) => {
+          for (const l of logs) candidateSet.add((l.args.onBehalf as string).toLowerCase());
+        },
+      } as any);
+    } catch {}
   }
 
   async function getMarketParams() {

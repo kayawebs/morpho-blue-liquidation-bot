@@ -21,15 +21,14 @@
 ## 构建
 - 先构建配置包：`pnpm build:config`
 
-## 启动索引器（Ponder）
-- 一条命令（开发态，同时跑索引器+机器人）：
-  - `pnpm dev`
-- 或手动分开：
-  - 终端1：`pnpm ponder:dev`
-  - 终端2：`pnpm cbbtc:start`
-- 已有外部服务时：在 `.env` 配置 `PONDER_SERVICE_URL`（可跳过本地启动）
+## 启动索引器（可选）
+- 默认候选集来源为“日志模式”，无需 Ponder：worker 将回溯最近 10,000 区块的 Borrow/SupplyCollateral 事件构建候选，并持续监听新增。
+- 需要候选的补充/对账时，可启动 Ponder（仅索引指定市场）：
+  - 根目录：`node scripts/ponder-fast.mjs`（读取 `markets.json` 自动注入 `FAST_ONLY_MARKETS`）
+  - 或 `pnpm -C apps/ponder start:fast:cbBTCUSDC`
+  - 运行后 worker 仍以“日志模式”为主；设置 `CANDIDATE_SOURCE=ponder` 可切换为 Ponder 候选。
 
-## 启动机器人
+## 启动机器人（Worker，默认日志模式）
 - 启动示例（cbBTC/USDT 机器人）：`pnpm cbbtc:start`
 - 启动内存池监听并运行：`pnpm mempool:start`
 - 一次性执行清算脚本：`pnpm liquidate`
