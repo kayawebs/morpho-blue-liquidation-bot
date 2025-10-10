@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, client, eq, graphql, replaceBigInts as replaceBigIntsBase } from "ponder";
+import { and, client, eq, inArray, graphql, replaceBigInts as replaceBigIntsBase } from "ponder";
 import { db, publicClients } from "ponder:api";
 import schema from "ponder:schema";
 import type { Address, Hex } from "viem";
@@ -55,6 +55,33 @@ app.post("/chain/:chainId/liquidatable-positions", async (c) => {
 
   const response = await getLiquidatablePositions({ db, chainId, publicClient, marketIds });
   return c.json(replaceBigInts(response));
+});
+
+// Return candidate users for provided markets (unique borrowers with borrowShares > 0)
+app.post("/chain/:chainId/candidates", async (c) => {
+  const { chainId: chainIdRaw } = c.req.param();
+  const { marketIds: marketIdsRaw } = (await c.req.json()) as unknown as { marketIds: Hex[] };
+
+  if (!Array.isArray(marketIdsRaw) || marketIdsRaw.length === 0) {
+    return c.json({ error: "Request body must include a non-empty `marketIds` array." }, 400);
+  }
+  const chainId = Number.parseInt(chainIdRaw, 10);
+  const marketIds = [...new Set(marketIdsRaw)];
+
+  const rows = await db
+    .select({ user: schema.position.user, marketId: schema.position.marketId })
+    .from(schema.position)
+    .where(and(eq(schema.position.chainId, chainId), inArray(schema.position.marketId, marketIds)))
+    .groupBy(schema.position.user, schema.position.marketId);
+
+  // Group by marketId -> users[]
+  const out: Record<string, string[]> = {};
+  for (const r of rows) {
+    const k = r.marketId as string;
+    if (!out[k]) out[k] = [];
+    out[k]!.push(r.user as string);
+  }
+  return c.json(out);
 });
 
 export default app;
