@@ -1,0 +1,15 @@
+{
+  "name": "@morpho-blue-liquidation-bot/predictor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:binance": "tsx src/connectors/binance.ts",
+    "backtest:ocr2": "tsx src/backtest/ocr2.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "pg": "^8.12.0"
+  }
+}
+
