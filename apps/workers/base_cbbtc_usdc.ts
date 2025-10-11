@@ -1,5 +1,6 @@
 import { chainConfig } from "../config/dist/index.js";
 import { base } from "viem/chains";
+import { createServer } from "http";
 import {
   createPublicClient,
   createWalletClient,
@@ -14,6 +15,10 @@ import { privateKeyToAccount } from "viem/accounts";
 import { AlchemyMempoolMonitor } from "../client/src/mempool/AlchemyMempoolMonitor.js";
 import { analyzeMorphoPendingTx } from "../client/src/fastpath/index.js";
 import { tryDecodeOcr2AnswerFromInput } from "../client/src/oracle-ocr/decoder.js";
+import { getAdapter } from "./oracleAdapters/registry.js";
+import { fetchAggregatedPrices } from "./utils/predictorClient.js";
+import { fetchOracleConfig } from "./utils/predictorConfigClient.js";
+import { AGGREGATOR_V2V3_ABI } from "./utils/chainlinkAbi.js";
 import { LiquidationBot } from "../client/src/bot.js";
 import { UniswapV3Venue } from "../client/src/liquidityVenues/uniswapV3/index.js";
 import { BaseChainlinkPricer } from "../client/src/pricers/baseChainlink/index.js";
@@ -324,6 +329,139 @@ async function main() {
 
   await monitor.start();
   console.log("✅ Worker running. Listening for Morpho & Oracle pending tx...");
+
+  // Predictor-trigger: always on
+  const PREDICTOR_URL = "http://localhost:48080";
+  let predictorRunning = false;
+  let dynamicOffsetBps = 50;
+  let dynamicHeartbeat = 60;
+  let predictorTriggers = 0;
+  let predictorAttemptsTotal = 0;
+  let predictorSuccessesTotal = 0;
+  const startedAt = Date.now();
+
+  // Refresh thresholds every 60s
+  setInterval(async () => {
+    try {
+      const { feedAddr } = getAdapter(MARKET.chainId, MARKET.feeds.BASE_FEED_1.address);
+      const th = await fetchOracleConfig("http://localhost:48080", MARKET.chainId, feedAddr);
+      if (th) {
+        const changed = th.offsetBps !== dynamicOffsetBps || th.heartbeatSeconds !== dynamicHeartbeat;
+        dynamicOffsetBps = th.offsetBps;
+        dynamicHeartbeat = th.heartbeatSeconds;
+        if (changed) {
+          console.log(
+            `🔧 [Predictor] Thresholds refreshed: offset=${dynamicOffsetBps}bps, heartbeat=${dynamicHeartbeat}s`,
+          );
+        }
+      }
+    } catch {}
+  }, 60_000);
+
+  setInterval(async () => {
+    if (predictorRunning) return;
+    predictorRunning = true;
+    try {
+      const { adapter, decimals, scaleFactor, feedAddr } = getAdapter(MARKET.chainId, MARKET.feeds.BASE_FEED_1.address);
+      const required = adapter.requiredSymbols();
+      const aggMap = await fetchAggregatedPrices(PREDICTOR_URL, required);
+      if (required.some((s) => aggMap[s] === undefined)) return;
+
+      // Read on-chain latest answer to compute offset/heartbeat decision
+      let chainAns = 0;
+      let updatedAt = 0;
+      try {
+        const round: any = await (publicClient as any).readContract({
+          address: feedAddr,
+          abi: AGGREGATOR_V2V3_ABI,
+          functionName: 'latestRoundData',
+        });
+        chainAns = Number(round[1]) / 10 ** decimals;
+        updatedAt = Number(round[3]);
+      } catch {}
+
+      const { answer, price1e36 } = adapter.compute({ agg: aggMap, decimals, scaleFactor });
+      if (answer === undefined || price1e36 === undefined) return;
+
+      const now = Math.floor(Date.now() / 1000);
+      const deltaBps = Math.round(((answer / (chainAns || answer) - 1) * 10_000));
+      const shouldByOffset = Math.abs(deltaBps) >= dynamicOffsetBps;
+      const age = updatedAt ? now - updatedAt : dynamicHeartbeat + 1;
+      const shouldByHb = age >= dynamicHeartbeat;
+      if (!shouldByOffset && !shouldByHb) return;
+      predictorTriggers++;
+
+      // With predicted price, recompute target market candidate positions and liquidate if profitable.
+      const [params, view] = await Promise.all([getMarketParams(), getMarketView()]);
+      const marketObj = new Market({
+        chainId: MARKET.chainId,
+        id: MARKET.marketId as any,
+        params: new MarketParams(params),
+        price: price1e36 as any,
+        totalSupplyAssets: view.totalSupplyAssets,
+        totalSupplyShares: view.totalSupplyShares,
+        totalBorrowAssets: view.totalBorrowAssets,
+        totalBorrowShares: view.totalBorrowShares,
+        lastUpdate: view.lastUpdate,
+        fee: view.fee,
+      }).accrueInterest(Math.floor(Date.now() / 1000).toString());
+
+      const batch = pickBatch();
+      let attempts = 0;
+      let successes = 0;
+      for (const user of batch) {
+        try {
+          const p = await getUserPosition(user);
+          if (p.borrowShares === 0n) continue;
+          const iposition: IAccrualPosition = {
+            chainId: MARKET.chainId,
+            marketId: MARKET.marketId as any,
+            user,
+            supplyShares: p.supplyShares,
+            borrowShares: p.borrowShares,
+            collateral: p.collateral,
+          };
+          const seizable = new AccrualPosition(iposition, marketObj).seizableCollateral ?? 0n;
+          if (seizable > 0n) {
+            console.log(`🎯 [Predictor] Candidate liquidatable: ${user} seizable=${seizable.toString()} delta=${deltaBps}bps age=${age}s`);
+            attempts++;
+            const ok = await liquidator.liquidateSingle(
+              marketObj,
+              { ...iposition, seizableCollateral: seizable } as any,
+            );
+            if (ok) successes++;
+          }
+        } catch {}
+      }
+      predictorAttemptsTotal += attempts;
+      predictorSuccessesTotal += successes;
+      console.log(`📈 [Predictor] Batch done: attempts=${attempts}, successes=${successes}`);
+    } catch {} finally {
+      predictorRunning = false;
+    }
+  }, 1000);
+
+  // Simple metrics server
+  const metricsServer = createServer((req, res) => {
+    if (req.url === "/metrics") {
+      const body = JSON.stringify({
+        uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
+        thresholds: { offsetBps: dynamicOffsetBps, heartbeatSeconds: dynamicHeartbeat },
+        candidates: { count: candidates.length },
+        predictor: {
+          triggers: predictorTriggers,
+          attemptsTotal: predictorAttemptsTotal,
+          successesTotal: predictorSuccessesTotal,
+        },
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(body);
+      return;
+    }
+    res.writeHead(404);
+    res.end("not found");
+  });
+  metricsServer.listen(48100, () => console.log("📊 Worker metrics on :48100/metrics"));
 
   // Graceful shutdown
   process.on("SIGINT", () => {

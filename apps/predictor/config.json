@@ -1,0 +1,40 @@
+{
+  "exchanges": ["binance", "okx", "coinbase"],
+  "pairs": [
+    {
+      "symbol": "BTCUSDC",
+      "binance": "BTCUSDC",
+      "okx": "BTC-USDC",
+      "coinbase": "BTC-USDC"
+    }
+  ],
+  "aggregator": {
+    "windowMs": 3000,
+    "trimRatio": 0.2,
+    "minExchanges": 2,
+    "weights": {
+      "binance": 1.0,
+      "okx": 1.0,
+      "coinbase": 1.0
+    }
+  },
+  "db": {
+    "url": "postgres://ponder:ponder@localhost:5432/ponder"
+  },
+  "rpc": {
+    "8453": "http://localhost:8545"
+  },
+  "oracles": [
+    {
+      "chainId": 8453,
+      "address": "0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8",
+      "type": "single",
+      "symbol": "BTCUSDC",
+      "decimals": 8,
+      "scaleFactor": "100000000000000000000000000"
+    }
+  ],
+  "service": {
+    "port": 48080
+  }
+}
