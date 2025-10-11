@@ -6,7 +6,8 @@
   "scripts": {
     "build:config": "pnpm --filter @morpho-blue-liquidation-bot/config build",
     "ponder:start": "node scripts/ponder-fast.mjs",
-    "worker:base:cbbtc_usdc": "pnpm build:config && tsx apps/workers/base_cbbtc_usdc.ts --env-file=.env"
+    "worker:base:cbbtc_usdc": "pnpm build:config && tsx apps/workers/base_cbbtc_usdc.ts --env-file=.env",
+    "predictor:start": "pnpm --filter @morpho-blue-liquidation-bot/predictor start"
   },
   "lint-staged": {
     "*.ts": [

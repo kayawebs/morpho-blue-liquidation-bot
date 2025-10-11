@@ -1,11 +1,8 @@
 import { Pool } from 'pg';
+import { loadConfig } from './config.js';
 
-const DEFAULT_URL = 'postgres://ponder:ponder@localhost:5432/ponder';
-
-export const pool = new Pool({
-  connectionString: process.env.POSTGRES_DATABASE_URL ?? DEFAULT_URL,
-  max: 10,
-});
+const cfg = loadConfig();
+export const pool = new Pool({ connectionString: cfg.db.url, max: 10 });
 
 export async function initSchema() {
   await pool.query(`
@@ -37,16 +34,49 @@ export async function initSchema() {
       tx_hash TEXT NOT NULL,
       answer NUMERIC NOT NULL,
       cex_price DOUBLE PRECISION NOT NULL,
+      event_ts TIMESTAMPTZ,
       error_bps INTEGER NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    ALTER TABLE oracle_pred_samples ADD COLUMN IF NOT EXISTS event_ts TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_oracle_samples_addr_ts ON oracle_pred_samples(oracle_addr, event_ts DESC);
   `);
 }
 
-export async function insertTick(source: string, symbol: string, ts: number, price: number) {
-  await pool.query(
-    'INSERT INTO cex_ticks(source, symbol, ts, price) VALUES($1,$2,to_timestamp($3),$4)',
-    [source, symbol, ts / 1000, price],
-  );
-}
+// Simple batch inserter to reduce DB overhead
+const batch: { source: string; symbol: string; ts: number; price: number }[] = [];
+let flushing = false;
+setInterval(async () => {
+  if (flushing || batch.length === 0) return;
+  flushing = true;
+  const items = batch.splice(0, batch.length);
+  const values: string[] = [];
+  const params: any[] = [];
+  let i = 1;
+  for (const it of items) {
+    values.push(`($${i++}, $${i++}, to_timestamp($${i++}), $${i++})`);
+    params.push(it.source, it.symbol, it.ts / 1000, it.price);
+  }
+  try {
+    await pool.query(
+      `INSERT INTO cex_ticks(source, symbol, ts, price) VALUES ${values.join(',')}`,
+      params,
+    );
+  } catch (e) {
+    // fallback to individual insert to avoid data loss
+    for (const it of items) {
+      try {
+        await pool.query(
+          'INSERT INTO cex_ticks(source, symbol, ts, price) VALUES($1,$2,to_timestamp($3),$4)',
+          [it.source, it.symbol, it.ts / 1000, it.price],
+        );
+      } catch {}
+    }
+  } finally {
+    flushing = false;
+  }
+}, 500);
 
+export async function insertTick(source: string, symbol: string, ts: number, price: number) {
+  batch.push({ source, symbol, ts, price });
+}
