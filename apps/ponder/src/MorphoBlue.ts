@@ -143,11 +143,60 @@ ponder.on("Morpho:AccrueInterest", async ({ event, context }) => {
 ponder.on("Morpho:Supply", async ({ event, context }) => {
   if (!fastCheck(event.args.id)) return;
   await Promise.all([
-    // Row must exist because `Supply` cannot preceed `CreateMarket`.
-    context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
-      totalSupplyAssets: row.totalSupplyAssets + event.args.assets,
-      totalSupplyShares: row.totalSupplyShares + event.args.shares,
-    })),
+    (async () => {
+      try {
+        await context.db
+          .update(market, { chainId: context.chain.id, id: event.args.id })
+          .set((row) => ({
+            totalSupplyAssets: row.totalSupplyAssets + event.args.assets,
+            totalSupplyShares: row.totalSupplyShares + event.args.shares,
+          }));
+      } catch {
+        try {
+          const [params, mview] = await Promise.all([
+            readContract(context.client as any, {
+              address: event.log.address,
+              abi: morphoBlueAbi,
+              functionName: "idToMarketParams",
+              args: [event.args.id],
+              blockNumber: event.block.number,
+            }),
+            readContract(context.client as any, {
+              address: event.log.address,
+              abi: morphoBlueAbi,
+              functionName: "market",
+              args: [event.args.id],
+              blockNumber: event.block.number,
+            }),
+          ]);
+          await context.db
+            .insert(market)
+            .values({
+              chainId: context.chain.id,
+              id: event.args.id,
+              loanToken: params.loanToken,
+              collateralToken: params.collateralToken,
+              oracle: params.oracle,
+              irm: params.irm,
+              lltv: params.lltv,
+              totalSupplyAssets: mview.totalSupplyAssets,
+              totalSupplyShares: mview.totalSupplyShares,
+              totalBorrowAssets: mview.totalBorrowAssets,
+              totalBorrowShares: mview.totalBorrowShares,
+              lastUpdate: event.block.timestamp,
+              fee: mview.fee,
+            })
+            .onConflictDoUpdate((row) => ({
+              totalSupplyAssets: mview.totalSupplyAssets,
+              totalSupplyShares: mview.totalSupplyShares,
+              totalBorrowAssets: mview.totalBorrowAssets,
+              totalBorrowShares: mview.totalBorrowShares,
+              lastUpdate: event.block.timestamp,
+              fee: mview.fee,
+            }));
+        } catch {}
+      }
+    })(),
     // Row may or may not exist because `Supply` could be `user`'s first action.
     context.db
       .insert(position)
@@ -168,11 +217,60 @@ ponder.on("Morpho:Supply", async ({ event, context }) => {
 ponder.on("Morpho:Withdraw", async ({ event, context }) => {
   if (!fastCheck(event.args.id)) return;
   await Promise.all([
-    // Row must exist because `Withdraw` cannot preceed `CreateMarket`.
-    context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
-      totalSupplyAssets: row.totalSupplyAssets - event.args.assets,
-      totalSupplyShares: row.totalSupplyShares - event.args.shares,
-    })),
+    (async () => {
+      try {
+        await context.db
+          .update(market, { chainId: context.chain.id, id: event.args.id })
+          .set((row) => ({
+            totalSupplyAssets: row.totalSupplyAssets - event.args.assets,
+            totalSupplyShares: row.totalSupplyShares - event.args.shares,
+          }));
+      } catch {
+        try {
+          const [params, mview] = await Promise.all([
+            readContract(context.client as any, {
+              address: event.log.address,
+              abi: morphoBlueAbi,
+              functionName: "idToMarketParams",
+              args: [event.args.id],
+              blockNumber: event.block.number,
+            }),
+            readContract(context.client as any, {
+              address: event.log.address,
+              abi: morphoBlueAbi,
+              functionName: "market",
+              args: [event.args.id],
+              blockNumber: event.block.number,
+            }),
+          ]);
+          await context.db
+            .insert(market)
+            .values({
+              chainId: context.chain.id,
+              id: event.args.id,
+              loanToken: params.loanToken,
+              collateralToken: params.collateralToken,
+              oracle: params.oracle,
+              irm: params.irm,
+              lltv: params.lltv,
+              totalSupplyAssets: mview.totalSupplyAssets,
+              totalSupplyShares: mview.totalSupplyShares,
+              totalBorrowAssets: mview.totalBorrowAssets,
+              totalBorrowShares: mview.totalBorrowShares,
+              lastUpdate: event.block.timestamp,
+              fee: mview.fee,
+            })
+            .onConflictDoUpdate((row) => ({
+              totalSupplyAssets: mview.totalSupplyAssets,
+              totalSupplyShares: mview.totalSupplyShares,
+              totalBorrowAssets: mview.totalBorrowAssets,
+              totalBorrowShares: mview.totalBorrowShares,
+              lastUpdate: event.block.timestamp,
+              fee: mview.fee,
+            }));
+        } catch {}
+      }
+    })(),
     // Row must exist because `Withdraw` cannot preceed `Supply`.
     (async () => {
       try {
@@ -272,10 +370,60 @@ ponder.on("Morpho:WithdrawCollateral", async ({ event, context }) => {
 ponder.on("Morpho:Borrow", async ({ event, context }) => {
   if (!fastCheck(event.args.id)) return;
   await Promise.all([
-    context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
-      totalBorrowAssets: row.totalBorrowAssets + event.args.assets,
-      totalBorrowShares: row.totalBorrowShares + event.args.shares,
-    })),
+    (async () => {
+      try {
+        await context.db
+          .update(market, { chainId: context.chain.id, id: event.args.id })
+          .set((row) => ({
+            totalBorrowAssets: row.totalBorrowAssets + event.args.assets,
+            totalBorrowShares: row.totalBorrowShares + event.args.shares,
+          }));
+      } catch {
+        try {
+          const [params, mview] = await Promise.all([
+            readContract(context.client as any, {
+              address: event.log.address,
+              abi: morphoBlueAbi,
+              functionName: "idToMarketParams",
+              args: [event.args.id],
+              blockNumber: event.block.number,
+            }),
+            readContract(context.client as any, {
+              address: event.log.address,
+              abi: morphoBlueAbi,
+              functionName: "market",
+              args: [event.args.id],
+              blockNumber: event.block.number,
+            }),
+          ]);
+          await context.db
+            .insert(market)
+            .values({
+              chainId: context.chain.id,
+              id: event.args.id,
+              loanToken: params.loanToken,
+              collateralToken: params.collateralToken,
+              oracle: params.oracle,
+              irm: params.irm,
+              lltv: params.lltv,
+              totalSupplyAssets: mview.totalSupplyAssets,
+              totalSupplyShares: mview.totalSupplyShares,
+              totalBorrowAssets: mview.totalBorrowAssets,
+              totalBorrowShares: mview.totalBorrowShares,
+              lastUpdate: event.block.timestamp,
+              fee: mview.fee,
+            })
+            .onConflictDoUpdate((row) => ({
+              totalSupplyAssets: mview.totalSupplyAssets,
+              totalSupplyShares: mview.totalSupplyShares,
+              totalBorrowAssets: mview.totalBorrowAssets,
+              totalBorrowShares: mview.totalBorrowShares,
+              lastUpdate: event.block.timestamp,
+              fee: mview.fee,
+            }));
+        } catch {}
+      }
+    })(),
     context.db
       .insert(position)
       .values({
@@ -291,11 +439,60 @@ ponder.on("Morpho:Borrow", async ({ event, context }) => {
 ponder.on("Morpho:Repay", async ({ event, context }) => {
   if (!fastCheck(event.args.id)) return;
   await Promise.all([
-    // Row must exist because `Repay` cannot preceed `CreateMarket`.
-    context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
-      totalBorrowAssets: row.totalBorrowAssets - event.args.assets,
-      totalBorrowShares: row.totalBorrowShares - event.args.shares,
-    })),
+    (async () => {
+      try {
+        await context.db
+          .update(market, { chainId: context.chain.id, id: event.args.id })
+          .set((row) => ({
+            totalBorrowAssets: row.totalBorrowAssets - event.args.assets,
+            totalBorrowShares: row.totalBorrowShares - event.args.shares,
+          }));
+      } catch {
+        try {
+          const [params, mview] = await Promise.all([
+            readContract(context.client as any, {
+              address: event.log.address,
+              abi: morphoBlueAbi,
+              functionName: "idToMarketParams",
+              args: [event.args.id],
+              blockNumber: event.block.number,
+            }),
+            readContract(context.client as any, {
+              address: event.log.address,
+              abi: morphoBlueAbi,
+              functionName: "market",
+              args: [event.args.id],
+              blockNumber: event.block.number,
+            }),
+          ]);
+          await context.db
+            .insert(market)
+            .values({
+              chainId: context.chain.id,
+              id: event.args.id,
+              loanToken: params.loanToken,
+              collateralToken: params.collateralToken,
+              oracle: params.oracle,
+              irm: params.irm,
+              lltv: params.lltv,
+              totalSupplyAssets: mview.totalSupplyAssets,
+              totalSupplyShares: mview.totalSupplyShares,
+              totalBorrowAssets: mview.totalBorrowAssets,
+              totalBorrowShares: mview.totalBorrowShares,
+              lastUpdate: event.block.timestamp,
+              fee: mview.fee,
+            })
+            .onConflictDoUpdate((row) => ({
+              totalSupplyAssets: mview.totalSupplyAssets,
+              totalSupplyShares: mview.totalSupplyShares,
+              totalBorrowAssets: mview.totalBorrowAssets,
+              totalBorrowShares: mview.totalBorrowShares,
+              lastUpdate: event.block.timestamp,
+              fee: mview.fee,
+            }));
+        } catch {}
+      }
+    })(),
     // Row must exist because `Repay` cannot preceed `SupplyCollateral`.
     (async () => {
       try {
@@ -339,16 +536,65 @@ ponder.on("Morpho:Repay", async ({ event, context }) => {
 ponder.on("Morpho:Liquidate", async ({ event, context }) => {
   if (!fastCheck(event.args.id)) return;
   await Promise.all([
-    // Row must exist because `Liquidate` cannot preceed `CreateMarket`.
-    context.db.update(market, { chainId: context.chain.id, id: event.args.id }).set((row) => ({
-      totalSupplyAssets: row.totalSupplyAssets - event.args.badDebtAssets,
-      totalSupplyShares: row.totalSupplyShares - event.args.badDebtShares,
-      totalBorrowAssets: zeroFloorSub(
-        row.totalBorrowAssets,
-        event.args.repaidAssets + event.args.badDebtAssets,
-      ),
-      totalBorrowShares: row.totalBorrowShares - event.args.repaidShares - event.args.badDebtShares,
-    })),
+    (async () => {
+      try {
+        await context.db
+          .update(market, { chainId: context.chain.id, id: event.args.id })
+          .set((row) => ({
+            totalSupplyAssets: row.totalSupplyAssets - event.args.badDebtAssets,
+            totalSupplyShares: row.totalSupplyShares - event.args.badDebtShares,
+            totalBorrowAssets: zeroFloorSub(
+              row.totalBorrowAssets,
+              event.args.repaidAssets + event.args.badDebtAssets,
+            ),
+            totalBorrowShares: row.totalBorrowShares - event.args.repaidShares - event.args.badDebtShares,
+          }));
+      } catch {
+        try {
+          const [params, mview] = await Promise.all([
+            readContract(context.client as any, {
+              address: event.log.address,
+              abi: morphoBlueAbi,
+              functionName: "idToMarketParams",
+              args: [event.args.id],
+              blockNumber: event.block.number,
+            }),
+            readContract(context.client as any, {
+              address: event.log.address,
+              abi: morphoBlueAbi,
+              functionName: "market",
+              args: [event.args.id],
+              blockNumber: event.block.number,
+            }),
+          ]);
+          await context.db
+            .insert(market)
+            .values({
+              chainId: context.chain.id,
+              id: event.args.id,
+              loanToken: params.loanToken,
+              collateralToken: params.collateralToken,
+              oracle: params.oracle,
+              irm: params.irm,
+              lltv: params.lltv,
+              totalSupplyAssets: mview.totalSupplyAssets,
+              totalSupplyShares: mview.totalSupplyShares,
+              totalBorrowAssets: mview.totalBorrowAssets,
+              totalBorrowShares: mview.totalBorrowShares,
+              lastUpdate: event.block.timestamp,
+              fee: mview.fee,
+            })
+            .onConflictDoUpdate((row) => ({
+              totalSupplyAssets: mview.totalSupplyAssets,
+              totalSupplyShares: mview.totalSupplyShares,
+              totalBorrowAssets: mview.totalBorrowAssets,
+              totalBorrowShares: mview.totalBorrowShares,
+              lastUpdate: event.block.timestamp,
+              fee: mview.fee,
+            }));
+        } catch {}
+      }
+    })(),
     (async () => {
       try {
         await context.db

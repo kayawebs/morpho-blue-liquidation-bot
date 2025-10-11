@@ -2,6 +2,7 @@ import { ponder } from "ponder:registry";
 import { market } from "ponder:schema";
 import { readContract } from "viem/actions";
 import { morphoBlueAbi } from "../abis/MorphoBlue";
+import { chainConfig } from "@morpho-blue-liquidation-bot/config";
 
 const FAST_ONLY_MARKETS = (process.env.FAST_ONLY_MARKETS ?? "")
   .split(",")
@@ -26,16 +27,17 @@ ponder.on("AdaptiveCurveIRM:BorrowRateUpdate", async ({ event, context }) => {
   } catch {
     // Hydrate missing market row on-demand (fast lookback mode):
     try {
+      const morphoAddress = chainConfig(context.chain.id).morpho.address;
       const [params, mview] = await Promise.all([
         readContract(context.client as any, {
-          address: event.log.address,
+          address: morphoAddress,
           abi: morphoBlueAbi,
           functionName: "idToMarketParams",
           args: [event.args.id],
           blockNumber: event.block.number,
         }),
         readContract(context.client as any, {
-          address: event.log.address,
+          address: morphoAddress,
           abi: morphoBlueAbi,
           functionName: "market",
           args: [event.args.id],

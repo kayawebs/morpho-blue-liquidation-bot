@@ -1,5 +1,6 @@
 import type { Client, Transport, Chain, Account, Hash, Address, Hex } from "viem";
 import { watchPendingTransactions, getTransaction } from "viem/actions";
+import WebSocket from "ws";
 
 export interface AlchemyMempoolConfig {
   client: Client<Transport, Chain, Account>;
@@ -7,6 +8,8 @@ export interface AlchemyMempoolConfig {
   oracleAddresses: Set<Address>;
   onPendingTransaction: (txHash: Hash, tx: any) => Promise<void>;
   pollingInterval: number; // milliseconds
+  wsUrl?: string; // optional WS URL for advanced subscriptions
+  useAlchemyFilter?: boolean; // prefer alchemy_pendingTransactions if true
 }
 
 export class AlchemyMempoolMonitor {
@@ -15,6 +18,8 @@ export class AlchemyMempoolMonitor {
   private lastSeenTxs = new Set<Hash>();
   private unwatch?: () => void;
   private usingWs = false;
+  private alchemyWs?: WebSocket;
+  private alchemySubId?: string;
   
   constructor(config: AlchemyMempoolConfig) {
     this.config = config;
@@ -24,6 +29,18 @@ export class AlchemyMempoolMonitor {
     console.log("🚀 Starting Alchemy mempool monitoring via pending block...");
     this.isRunning = true;
     
+    // Prefer Alchemy filtered pending if available (greatly reduces traffic)
+    const wantAlchemy =
+      !!this.config.wsUrl && (this.config.useAlchemyFilter ?? /alchemy\.com/.test(this.config.wsUrl));
+    if (wantAlchemy) {
+      try {
+        await this.startAlchemyPendingFilter();
+        return;
+      } catch (err) {
+        console.warn("⚠️ alchemy_pendingTransactions failed, falling back to standard WS/polling");
+      }
+    }
+
     // 如果是 WS transport，优先使用 watchPendingTransactions
     try {
       // @ts-expect-error - narrow transport type at runtime
@@ -80,6 +97,70 @@ export class AlchemyMempoolMonitor {
       this.unwatch = undefined;
     }
     this.usingWs = false;
+    if (this.alchemyWs) {
+      try {
+        this.alchemyWs.close();
+      } catch {}
+      this.alchemyWs = undefined;
+      this.alchemySubId = undefined;
+    }
+  }
+
+  private async startAlchemyPendingFilter() {
+    const wsUrl = this.config.wsUrl!;
+    console.log("🔌 Using Alchemy filtered pending subscription");
+    const ws = new WebSocket(wsUrl);
+    this.alchemyWs = ws;
+
+    const toAddress = [this.config.morphoAddress.toLowerCase(), ...this.config.oracleAddresses].map((a) =>
+      a.toLowerCase(),
+    );
+    const subReq = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "alchemy_pendingTransactions",
+      params: [
+        {
+          toAddress,
+          hashesOnly: false,
+        },
+      ],
+    };
+
+    await new Promise<void>((resolve, reject) => {
+      ws.on("open", () => {
+        ws.send(JSON.stringify(subReq));
+      });
+      ws.on("message", (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.id === 1 && msg.result && typeof msg.result === "string") {
+            this.alchemySubId = msg.result as string;
+            resolve();
+            return;
+          }
+          if (msg.method === "eth_subscription" && msg.params?.subscription === this.alchemySubId) {
+            const tx = msg.params?.result;
+            const hash = tx?.hash as Hash | undefined;
+            if (!hash) return;
+            if (this.lastSeenTxs.has(hash)) return;
+            this.lastSeenTxs.add(hash);
+            const to = (tx.to ?? "").toLowerCase();
+            if (!toAddress.includes(to)) return;
+            void this.config.onPendingTransaction(hash, tx);
+          }
+        } catch {}
+      });
+      ws.on("error", (err) => {
+        reject(err as Error);
+      });
+      ws.on("close", () => {
+        if (this.isRunning) {
+          console.warn("⚠️ Alchemy WS closed, falling back to standard WS/polling");
+          void this.start();
+        }
+      });
+    });
   }
   
   private async pollPendingBlock() {

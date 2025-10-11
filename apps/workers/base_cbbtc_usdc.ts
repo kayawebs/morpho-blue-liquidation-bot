@@ -241,6 +241,8 @@ async function main() {
     morphoAddress: MARKET.morphoAddress,
     oracleAddresses: watchAddresses,
     pollingInterval: 200,
+    wsUrl: cfg.wsRpcUrl,
+    useAlchemyFilter: !!cfg.wsRpcUrl && cfg.wsRpcUrl.includes("alchemy.com"),
     onPendingTransaction: async (txHash: Hash, tx: { to?: Address; input?: `0x${string}` }) => {
       if (!tx.to) return;
       try {
