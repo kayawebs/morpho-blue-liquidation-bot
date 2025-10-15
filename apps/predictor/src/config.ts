@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface PredictorConfig {
   exchanges: string[];
@@ -11,9 +12,10 @@ export interface PredictorConfig {
 }
 
 export function loadConfig(): PredictorConfig {
-  const p = resolve(process.cwd(), 'apps/predictor/config.json');
+  // Resolve relative to this package directory (apps/predictor)
+  const here = dirname(fileURLToPath(import.meta.url));
+  const p = resolve(here, '../config.json');
   const raw = readFileSync(p, 'utf8');
   const cfg = JSON.parse(raw) as PredictorConfig;
   return cfg;
 }
-
