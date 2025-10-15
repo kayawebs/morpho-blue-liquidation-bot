@@ -2,7 +2,7 @@ import { initSchema, insertTick } from './db.js';
 import { PriceAggregator } from './aggregator.js';
 import { MultiCexConnector } from './connectors/ccxws.js';
 import { buildApp } from './service.js';
-import { serve } from '@hono/node-server';
+import { serve } from 'hono/serve';
 import { loadConfig } from './config.js';
 
 async function main() {
