@@ -1,4 +1,5 @@
 import { loadConfig } from '../config.js';
+import { makeFetchWithProxy } from '../utils/proxy.js';
 
 type Handler = (p: { ts: number; price: number; source: string; symbol: string }) => void;
 
@@ -13,20 +14,21 @@ export class HttpPollConnector {
 
   async start() {
     const cfg = loadConfig();
+    const f = await makeFetchWithProxy();
     for (const p of cfg.pairs) {
       const norm = p.symbol;
-      if (p.binance) this.poll('binance', norm, p.binance);
-      if (p.okx) this.poll('okx', norm, p.okx);
-      if (p.coinbase) this.poll('coinbase', norm, p.coinbase);
+      if (p.binance) this.poll(f, 'binance', norm, p.binance);
+      if (p.okx) this.poll(f, 'okx', norm, p.okx);
+      if (p.coinbase) this.poll(f, 'coinbase', norm, p.coinbase);
     }
   }
 
-  private poll(exchange: string, normSymbol: string, exSymbol: string) {
+  private poll(fetchImpl: typeof fetch, exchange: string, normSymbol: string, exSymbol: string) {
     const url = this.buildUrl(exchange, exSymbol);
     if (!url) return;
     const run = async () => {
       try {
-        const res = await fetch(url, { headers: { 'accept': 'application/json', 'user-agent': 'Mozilla/5.0' } });
+        const res = await fetchImpl(url, { headers: { 'accept': 'application/json', 'user-agent': 'Mozilla/5.0' } });
         if (!res.ok) return;
         const data = await res.json();
         const price = this.parsePrice(exchange, data);

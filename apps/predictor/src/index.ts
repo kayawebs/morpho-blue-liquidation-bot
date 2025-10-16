@@ -1,12 +1,16 @@
+import './env.js';
 import { initSchema, insertTick } from './db.js';
+// No global fetch proxy injection here to avoid undici Response mismatch issues.
 import { PriceAggregator } from './aggregator.js';
 import { MultiCexConnector } from './connectors/ccxws.js';
+import { DirectWsConnector } from './connectors/directWs.js';
 import { HttpPollConnector } from './connectors/httpPoll.js';
 import { buildApp } from './service.js';
 import { serve } from '@hono/node-server';
 import { loadConfig } from './config.js';
 
 async function main() {
+  // Fetch proxy is applied per-request inside HttpPollConnector.
   await initSchema();
   const cfg = loadConfig();
   const agg = new PriceAggregator(
@@ -22,7 +26,8 @@ async function main() {
   };
 
   const useWs = cfg.aggregator && (cfg.aggregator as any).ws !== false;
-  const wsConnector = new MultiCexConnector(onTick);
+  const useDirectWs = process.env.PREDICTOR_WS_DIRECT === '1' || process.env.PREDICTOR_WS_MODE === 'direct';
+  const wsConnector = useDirectWs ? new DirectWsConnector(onTick) : new MultiCexConnector(onTick);
   const httpConnector = new HttpPollConnector(onTick, 1000);
   if (useWs) {
     await wsConnector.start();

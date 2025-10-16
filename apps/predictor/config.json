@@ -17,7 +17,7 @@
       "okx": 1.0,
       "coinbase": 1.0
     },
-    "ws": false
+    "ws": true
   },
   "db": {
     "url": "postgres://ponder:ponder@localhost:5432/ponder"

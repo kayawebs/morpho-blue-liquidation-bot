@@ -145,9 +145,18 @@ importers:
       hono:
         specifier: ^4.5.0
         version: 4.9.8
+      https-proxy-agent:
+        specifier: ^5.0.1
+        version: 5.0.1
       pg:
         specifier: ^8.12.0
         version: 8.16.3
+      undici:
+        specifier: ^6.19.8
+        version: 6.22.0
+      ws:
+        specifier: ^8.17.1
+        version: 8.18.3
 
 packages:
 
@@ -3049,7 +3058,6 @@ packages:
     transitivePeerDependencies:
       - supports-color
     dev: false
-    optional: true
 
   /aggregate-error@3.1.0:
     resolution: {integrity: sha512-4I7Td01quW/RpocfNayFdFVk1qSuoh0E7JrbRJ16nH01HhKFQ88INq9Sd+nd72zqRySlr9BmDA8xlEJ6vJMrYA==}
@@ -4629,7 +4637,6 @@ packages:
     transitivePeerDependencies:
       - supports-color
     dev: false
-    optional: true
 
   /human-signals@2.1.0:
     resolution: {integrity: sha512-B4FFZ6q/T2jhhksgkbEW3HBvWIfDW85snkQgawt07S7J5QXTk6BkNV+0yAeZrM5QpMAdYlocGoljn0sJ/WQkFw==}
@@ -6287,6 +6294,11 @@ packages:
       '@fastify/busboy': 2.1.1
     dev: false
     optional: true
+
+  /undici@6.22.0:
+    resolution: {integrity: sha512-hU/10obOIu62MGYjdskASR3CUAiYaFTtC9Pa6vHyf//mAipSvSQg6od2CnJswq7fvzNS3zJhxoRkgNVaHurWKw==}
+    engines: {node: '>=18.17'}
+    dev: false
 
   /universalify@0.1.2:
     resolution: {integrity: sha512-rBJeI5CXAlmy1pV+617WB9J63U6XcazHHF2f2dbJix4XzpUF0RS3Zbj0FGIOCAva5P/d/GBOYaACQ1w+0azUkg==}

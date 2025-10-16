@@ -1,7 +1,10 @@
+import "../env.js";
 import { loadConfig } from "../config.js";
+import { makeFetchWithProxy } from "../utils/proxy.js";
 
 async function testRest() {
   const cfg = loadConfig();
+  const fetchImpl = await makeFetchWithProxy();
   const headers = { accept: "application/json", "user-agent": "Mozilla/5.0" } as const;
   const results: any[] = [];
 
@@ -10,7 +13,7 @@ async function testRest() {
     // Binance
     if (p.binance) {
       const url = `https://api.binance.com/api/v3/ticker/price?symbol=${encodeURIComponent(p.binance)}`;
-      const r = await fetch(url, { headers }).catch((e) => ({ ok: false, statusText: String(e) } as any));
+      const r = await fetchImpl(url, { headers }).catch((e) => ({ ok: false, statusText: String(e) } as any));
       let price: number | undefined = undefined;
       let status = "ERR";
       if ((r as any)?.ok) {
@@ -23,7 +26,7 @@ async function testRest() {
     // OKX
     if (p.okx) {
       const url = `https://www.okx.com/api/v5/market/ticker?instId=${encodeURIComponent(p.okx)}`;
-      const r = await fetch(url, { headers }).catch((e) => ({ ok: false, statusText: String(e) } as any));
+      const r = await fetchImpl(url, { headers }).catch((e) => ({ ok: false, statusText: String(e) } as any));
       let price: number | undefined = undefined;
       let status = "ERR";
       if ((r as any)?.ok) {
@@ -36,7 +39,7 @@ async function testRest() {
     // Coinbase
     if (p.coinbase) {
       const url = `https://api.exchange.coinbase.com/products/${encodeURIComponent(p.coinbase)}/ticker`;
-      const r = await fetch(url, { headers }).catch((e) => ({ ok: false, statusText: String(e) } as any));
+      const r = await fetchImpl(url, { headers }).catch((e) => ({ ok: false, statusText: String(e) } as any));
       let price: number | undefined = undefined;
       let status = "ERR";
       if ((r as any)?.ok) {
@@ -55,6 +58,7 @@ async function testRest() {
 
 async function main() {
   console.log("🔍 Testing REST connectivity to exchanges defined in config.json ...");
+  await ensureGlobalHttpProxy();
   await testRest();
   console.log("✅ Done");
 }
@@ -63,4 +67,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-

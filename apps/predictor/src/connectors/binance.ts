@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { buildWsProxyAgent, describeSelectedProxy } from '../utils/proxy.js';
 import { initSchema, insertTick } from '../db.js';
 
 // Minimal Binance spot trades stream for BTCUSDC
@@ -7,7 +8,13 @@ const WS_URL = 'wss://stream.binance.com:9443/ws/btcusdc@trade';
 async function main() {
   await initSchema();
   console.log('📡 Binance connector starting (BTCUSDC)');
-  const ws = new WebSocket(WS_URL);
+  const agent = buildWsProxyAgent(WS_URL);
+  if (agent) {
+    console.log(`🌐 Using proxy for WS: ${describeSelectedProxy(WS_URL)}`);
+  } else {
+    console.log('🌐 No proxy configured for WS');
+  }
+  const ws = new WebSocket(WS_URL, { agent: agent as any });
   ws.on('open', () => console.log('🔌 Binance WS connected'));
   ws.on('message', async (data) => {
     try {
@@ -27,4 +34,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-
