@@ -2,6 +2,7 @@ import { createPublicClient, http, getAbiItem } from 'viem';
 import { pool, initSchema } from '../db.js';
 import { morphoBlueAbi } from '../../../apps/ponder/abis/MorphoBlue.js';
 import { loadConfig } from '../config.js';
+import { buildAdapter } from '../oracleAdapters.js';
 
 // Backtest OCR2 aggregator vs CEX price to estimate offset/heartbeat
 
@@ -43,6 +44,7 @@ async function main() {
     const oracleAddr = String(o.address);
     const scaleFactor = BigInt(String(o.scaleFactor));
     const decimals = Number(o.decimals);
+    const adapter = buildAdapter(chainId, oracleAddr);
     const client = createPublicClient({ transport: http(rpcUrl) });
   const toBlock = await client.getBlockNumber();
   const fromBlock = toBlock - 10_000n > 0n ? toBlock - 10_000n : 0n;
@@ -53,19 +55,32 @@ async function main() {
       // 取事件块时间戳为 event_ts
       const blk = await client.getBlock({ blockNumber: l.blockNumber });
       const tsSec = Number(blk.timestamp);
-      // 以 event_ts 为中心的 ±2s 窗口中位数
-      const { rows } = await pool.query(
-        `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::float AS p
-         FROM cex_ticks WHERE symbol=$1 AND ts BETWEEN to_timestamp($2-2) AND to_timestamp($2+2)`,
-        ['BTCUSDC', tsSec],
-      );
-      const cex = Number(rows[0]?.p);
-      if (!Number.isFinite(cex)) continue;
-      const errorBps = Math.round(((ans / cex - 1) * 10_000));
+      // 根据 adapter 所需符号，计算每个符号在 ±2s 窗口的中位数，组装 aggMap
+      const required = adapter.requiredSymbols();
+      const aggMap: Record<string, number | undefined> = {};
+      let missing = false;
+      for (const sym of required) {
+        const { rows } = await pool.query(
+          `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::float AS p
+           FROM cex_ticks WHERE symbol=$1 AND ts BETWEEN to_timestamp($2-2) AND to_timestamp($2+2)`,
+          [sym, tsSec],
+        );
+        const p = Number(rows[0]?.p);
+        if (!Number.isFinite(p)) {
+          missing = true;
+          break;
+        }
+        aggMap[sym] = p;
+      }
+      if (missing) continue;
+      // 用 adapter.compute() 得到预测价
+      const { answer: pred } = adapter.compute({ agg: aggMap, decimals, scaleFactor });
+      if (!Number.isFinite(pred)) continue;
+      const errorBps = Math.round(((ans / (pred as number) - 1) * 10_000));
       await pool.query(
         `INSERT INTO oracle_pred_samples(chain_id, oracle_addr, block_number, tx_hash, answer, cex_price, error_bps)
          VALUES($1,$2,$3,$4,$5,$6,$7)`,
-        [chainId, oracleAddr, Number(l.blockNumber), l.transactionHash, ans, cex, errorBps],
+        [chainId, oracleAddr, Number(l.blockNumber), l.transactionHash, ans, pred, errorBps],
       );
       // 写回 event_ts
       await pool.query(`UPDATE oracle_pred_samples SET event_ts=to_timestamp($1) WHERE tx_hash=$2`, [tsSec, l.transactionHash]);
