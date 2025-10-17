@@ -1,3 +1,4 @@
+import '../env.js';
 import { pool } from '../db.js';
 import { loadConfig } from '../config.js';
 import { createPublicClient, http } from 'viem';
@@ -65,6 +66,8 @@ async function main() {
     if (res) ok++;
   }
   console.log(`Calibrated ${ok}/${oracles.length} oracles.`);
+  try { await pool.end(); } catch {}
+  process.exit(0);
 }
 
 main().catch((e) => {

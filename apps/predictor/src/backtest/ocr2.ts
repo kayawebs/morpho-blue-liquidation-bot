@@ -1,3 +1,4 @@
+import '../env.js';
 import { createPublicClient, http, getAbiItem } from 'viem';
 import { pool, initSchema } from '../db.js';
 import { morphoBlueAbi } from '../../../apps/ponder/abis/MorphoBlue.js';
@@ -90,6 +91,8 @@ async function main() {
     console.log(`Backtest oracle ${oracleAddr} on chain ${chainId}: ${samples} samples`);
   }
   console.log(`Backtest done: total ${total} samples`);
+  try { await pool.end(); } catch {}
+  process.exit(0);
 }
 
 main().catch((e) => {
