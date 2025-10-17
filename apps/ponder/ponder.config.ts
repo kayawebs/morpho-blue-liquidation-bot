@@ -36,6 +36,12 @@ const chains = Object.fromEntries(
 export default createConfig({
   ordering: "multichain",
   chains,
+  database: {
+    kind: "postgres",
+    connectionString:
+      process.env.POSTGRES_DATABASE_URL ?? "postgres://ponder:ponder@localhost:5432/ponder",
+    schema: process.env.PONDER_DB_SCHEMA ?? process.env.DATABASE_SCHEMA ?? "mblb_ponder",
+  },
   contracts: {
     Morpho: {
       abi: morphoBlueAbi,
@@ -118,11 +124,6 @@ export default createConfig({
         }
       >,
     },
-  },
-  database: {
-    kind: "postgres",
-    connectionString:
-      process.env.POSTGRES_DATABASE_URL ?? "postgres://ponder:ponder@localhost:5432/ponder",
   },
 });
 

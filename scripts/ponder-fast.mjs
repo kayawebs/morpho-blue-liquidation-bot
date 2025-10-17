@@ -19,7 +19,7 @@ async function main() {
   const env = {
     ...process.env,
     FAST_ONLY_MARKETS: fast,
-    DATABASE_SCHEMA: './ponder.schema.ts',
+    DATABASE_SCHEMA: process.env.PONDER_DB_SCHEMA ?? 'mblb_ponder',
     FAST_LOOKBACK_BLOCKS: process.env.FAST_LOOKBACK_BLOCKS ?? '10000',
   };
 
