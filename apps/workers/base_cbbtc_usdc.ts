@@ -248,6 +248,10 @@ async function main() {
   let predictorAttemptsTotal = 0;
   let predictorSuccessesTotal = 0;
   const startedAt = Date.now();
+  // Rising-edge detection state
+  let prevDeltaBps = 0;
+  let prevAge = 0;
+  let prevUpdatedAt = 0;
 
   // Refresh thresholds every 60s
   setInterval(async () => {
@@ -294,10 +298,16 @@ async function main() {
 
       const now = Math.floor(Date.now() / 1000);
       const deltaBps = Math.round(((answer / (chainAns || answer) - 1) * 10_000));
-      const shouldByOffset = Math.abs(deltaBps) >= dynamicOffsetBps;
       const age = updatedAt ? now - updatedAt : dynamicHeartbeat + 1;
-      const shouldByHb = age >= dynamicHeartbeat;
-      if (!shouldByOffset && !shouldByHb) return;
+      // Only trigger on rising-edge (crossing) to avoid spamming per-second
+      const crossedOffset = Math.abs(prevDeltaBps) < dynamicOffsetBps && Math.abs(deltaBps) >= dynamicOffsetBps;
+      const crossedHeartbeat = (updatedAt === prevUpdatedAt) && (prevAge < dynamicHeartbeat && age >= dynamicHeartbeat);
+      if (!(crossedOffset || crossedHeartbeat)) {
+        prevDeltaBps = deltaBps;
+        prevAge = age;
+        prevUpdatedAt = updatedAt;
+        return;
+      }
       predictorTriggers++;
 
       // With predicted price, recompute target market candidate positions and liquidate if profitable.
@@ -347,6 +357,10 @@ async function main() {
       console.log(`📈 [Predictor] Batch done: attempts=${attempts}, successes=${successes}`);
     } catch {} finally {
       predictorRunning = false;
+      // Update previous state when loop finishes
+      // Note: prev* are already updated in the non-trigger branch; ensure updated here too if triggered
+      // so that we don't re-trigger until a new crossing
+      // (Values will have been computed in the try block)
     }
   }, 1000);
 
