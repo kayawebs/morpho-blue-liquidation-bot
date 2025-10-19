@@ -13,7 +13,7 @@ export interface PredictorDeps {
 
 export function buildApp(deps: PredictorDeps) {
   const app = new Hono();
-  const cfg = loadConfig();
+  const appCfg = loadConfig();
 
   app.get('/health', (c) => c.text('ok'));
 
@@ -31,7 +31,7 @@ export function buildApp(deps: PredictorDeps) {
   // Lightweight metrics (no env config): current agg + recent tick rates + oracle configs
   app.get('/metrics', async (c) => {
     // Symbols from config
-    const syms = (cfg.pairs ?? []).map((p) => p.symbol);
+    const syms = (appCfg.pairs ?? []).map((p) => p.symbol);
     const symbols = syms.map((s) => {
       const ag = deps.agg.aggregated(s);
       return { symbol: s, aggregatedPrice: ag.price, sources: ag.sources, count: ag.count };
@@ -66,13 +66,13 @@ export function buildApp(deps: PredictorDeps) {
     const addr = c.req.param('addr');
     const sym = c.req.query('symbol') ?? 'BTCUSDC';
     const rowRes = await pool.query(
-      'SELECT heartbeat_seconds, offset_bps, decimals, scale_factor FROM oracle_pred_config WHERE chain_id=$1 AND oracle_addr=$2',
+      'SELECT heartbeat_seconds, offset_bps, decimals, scale_factor FROM oracle_pred_config WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)',
       [chainId, addr],
     );
     if (rowRes.rows.length === 0) return c.json({ error: 'config not found' }, 404);
-    const cfg = rowRes.rows[0]!;
+    const row = rowRes.rows[0]!;
 
-    const rpc = cfg.rpc[String(chainId)];
+    const rpc = appCfg.rpc[String(chainId)];
     if (!rpc) return c.json({ error: `RPC for chain ${chainId} not set in config` }, 400);
     const client = createPublicClient({ transport: http(rpc) });
 
@@ -97,18 +97,18 @@ export function buildApp(deps: PredictorDeps) {
     for (const s of required) aggMap[s] = deps.agg.aggregated(s).price;
     if (required.some((s) => aggMap[s] === undefined)) return c.json({ error: 'no price' }, 503);
 
-    const offset = Number(cfg.offset_bps);
+    const offset = Number(row.offset_bps);
     const m = aggMap[required[0]!]!;
     const deltaBps = Math.round(((m / (chainAns || m) - 1) * 10_000));
     const shouldByOffset = Math.abs(deltaBps) >= offset;
 
     const now = Math.floor(Date.now() / 1000);
-    const hb = Number(cfg.heartbeat_seconds);
+    const hb = Number(row.heartbeat_seconds);
     const age = updatedAt ? now - updatedAt : hb + 1;
     const shouldByHb = age >= hb;
 
-    const scale = BigInt(cfg.scale_factor);
-    const { answer, price1e36 } = adapter.compute({ agg: aggMap, decimals: Number(cfg.decimals), scaleFactor: scale });
+    const scale = BigInt(row.scale_factor);
+    const { answer, price1e36 } = adapter.compute({ agg: aggMap, decimals: Number(row.decimals), scaleFactor: scale });
 
     return c.json({
       symbol: sym,

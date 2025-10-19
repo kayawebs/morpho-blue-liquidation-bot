@@ -20,9 +20,12 @@ export class AlchemyMempoolMonitor {
   private usingWs = false;
   private alchemyWs?: WebSocket;
   private alchemySubId?: string;
+  private oracleAddrsLc: Set<string>;
   
   constructor(config: AlchemyMempoolConfig) {
     this.config = config;
+    // Normalize oracle addresses to lowercase for consistent matching
+    this.oracleAddrsLc = new Set<string>([...config.oracleAddresses].map((a) => a.toLowerCase()));
   }
   
   async start() {
@@ -112,9 +115,7 @@ export class AlchemyMempoolMonitor {
     const ws = new WebSocket(wsUrl);
     this.alchemyWs = ws;
 
-    const toAddress = [this.config.morphoAddress.toLowerCase(), ...this.config.oracleAddresses].map((a) =>
-      a.toLowerCase(),
-    );
+    const toAddress = [this.config.morphoAddress.toLowerCase(), ...this.oracleAddrsLc];
     const subReq = {
       jsonrpc: "2.0",
       id: 1,
@@ -212,7 +213,7 @@ export class AlchemyMempoolMonitor {
     // 检查是否是我们关心的交易
     
     // 1. 检查是否是预言机价格更新
-    if (tx.to && this.config.oracleAddresses.has(tx.to.toLowerCase())) {
+    if (tx.to && this.oracleAddrsLc.has(tx.to.toLowerCase())) {
       console.log(`📊 Oracle price update detected: ${tx.to}`);
       return true;
     }

@@ -241,7 +241,10 @@ async function main() {
     MARKET.feeds.BASE_FEED_1.address, // only real writer
   ]);
 
-  const monitor = new AlchemyMempoolMonitor({
+  const ENABLE_MEMPOOL = process.env.WORKER_MEMPOOL === '1' || process.env.ENABLE_MEMPOOL === '1';
+  let monitor: AlchemyMempoolMonitor | undefined;
+  if (ENABLE_MEMPOOL) {
+  monitor = new AlchemyMempoolMonitor({
     client: publicClient as any,
     morphoAddress: MARKET.morphoAddress,
     oracleAddresses: watchAddresses,
@@ -322,6 +325,7 @@ async function main() {
       }
     },
   });
+  }
 
   // Initial candidates fetch + schedule refresh
   await fetchCandidates();
@@ -465,11 +469,11 @@ async function main() {
 
   // Graceful shutdown
   process.on("SIGINT", () => {
-    monitor.stop();
+    if (monitor) monitor.stop();
     process.exit(0);
   });
   process.on("SIGTERM", () => {
-    monitor.stop();
+    if (monitor) monitor.stop();
     process.exit(0);
   });
 }
