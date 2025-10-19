@@ -8,6 +8,7 @@
     "dev:binance:proxy": "tsx src/connectors/binance.ts",
     "backtest:ocr2": "tsx src/backtest/ocr2.ts",
     "calibrate": "tsx src/calibrate/fit.ts",
+    "tune": "tsx src/calibrate/tune.ts",
     "start": "tsx src/index.ts",
     "start:proxy": "tsx src/index.ts",
     "test:connectivity": "tsx src/tools/test-connectivity.ts",

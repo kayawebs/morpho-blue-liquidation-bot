@@ -6,6 +6,13 @@ import { loadConfig } from '../config.js';
 import { buildAdapter } from '../oracleAdapters.js';
 
 // Backtest OCR2 aggregator vs CEX price to estimate offset/heartbeat
+function medianNum(nums: number[]): number | undefined {
+  if (!nums.length) return undefined;
+  const arr = [...nums].sort((a, b) => a - b);
+  const n = arr.length;
+  const idx = n % 2 === 1 ? (n >> 1) : ((n >> 1) - 1);
+  return arr[idx];
+}
 
 async function main() {
   await initSchema();
@@ -35,6 +42,7 @@ async function main() {
   }) as any;
 
   let total = 0;
+  const verbose = (process.env.BACKTEST_VERBOSE ?? '1') !== '0';
   for (const o of oracles) {
     const chainId = Number(o.chainId);
     const rpcUrl = cfg.rpc[String(chainId)];
@@ -69,6 +77,9 @@ async function main() {
         const p = Number(rows[0]?.p);
         if (!Number.isFinite(p)) {
           missing = true;
+          if (verbose) {
+            console.log(JSON.stringify({ kind: 'missing_cex', chainId, oracleAddr, block: Number(l.blockNumber), tx: l.transactionHash, ts: tsSec, symbol: sym }, null, 0));
+          }
           break;
         }
         aggMap[sym] = p;
@@ -76,8 +87,49 @@ async function main() {
       if (missing) continue;
       // 用 adapter.compute() 得到预测价
       const { answer: pred } = adapter.compute({ agg: aggMap, decimals, scaleFactor });
-      if (!Number.isFinite(pred)) continue;
-      const errorBps = Math.round(((ans / (pred as number) - 1) * 10_000));
+      // 保护：预测价必须为正且有限
+      if (!Number.isFinite(pred) || (pred as number) <= 0) {
+        if (verbose) console.log(JSON.stringify({ kind: 'invalid_pred', chainId, oracleAddr, block: Number(l.blockNumber), tx: l.transactionHash, ts: tsSec, required, aggMap, pred }, null, 0));
+        continue;
+      }
+      const ratio = ans / (pred as number);
+      if (!Number.isFinite(ratio)) {
+        if (verbose) console.log(JSON.stringify({ kind: 'invalid_ratio', chainId, oracleAddr, block: Number(l.blockNumber), tx: l.transactionHash, ts: tsSec, ans, pred }, null, 0));
+        continue;
+      }
+      const errorBps = Math.round(((ratio - 1) * 10_000));
+      if (!Number.isFinite(errorBps)) {
+        if (verbose) console.log(JSON.stringify({ kind: 'invalid_error', chainId, oracleAddr, block: Number(l.blockNumber), tx: l.transactionHash, ts: tsSec, ratio }, null, 0));
+        continue;
+      }
+      // 可选：打印 observations 信息（若事件包含）
+      let obsInfo: { count?: number; median?: number } = {};
+      try {
+        const obs = (l.args as any)?.observations as any[] | undefined;
+        if (Array.isArray(obs) && obs.length > 0) {
+          const arr = obs.map((x) => Number(x) / 10 ** decimals).filter((x) => Number.isFinite(x));
+          const m = medianNum(arr);
+          obsInfo = { count: arr.length, median: m };
+        }
+      } catch {}
+      if (verbose) {
+        console.log(JSON.stringify({
+          kind: 'sample',
+          chainId,
+          oracleAddr,
+          block: Number(l.blockNumber),
+          tx: l.transactionHash,
+          ts: tsSec,
+          onchainAnswer: ans,
+          decimals,
+          required,
+          cexMedians: aggMap,
+          predicted: pred,
+          ratio,
+          errorBps,
+          observations: obsInfo,
+        }, null, 0));
+      }
       await pool.query(
         `INSERT INTO oracle_pred_samples(chain_id, oracle_addr, block_number, tx_hash, answer, cex_price, error_bps)
          VALUES($1,$2,$3,$4,$5,$6,$7)`,

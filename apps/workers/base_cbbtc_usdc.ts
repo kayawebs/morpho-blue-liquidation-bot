@@ -12,7 +12,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 
 import { getAdapter } from "./oracleAdapters/registry.js";
-import { fetchAggregatedPrices } from "./utils/predictorClient.js";
+import { fetchAggregatedPrices, fetchPredictedAt } from "./utils/predictorClient.js";
 import { fetchOracleConfig } from "./utils/predictorConfigClient.js";
 import { AGGREGATOR_V2V3_ABI } from "./utils/chainlinkAbi.js";
 import { LiquidationBot } from "../client/src/bot.js";
@@ -253,6 +253,7 @@ async function main() {
   let prevAge = 0;
   let prevUpdatedAt = 0;
   let triggeredOffsetRoundAt = -1; // updatedAt of the round when offset last triggered
+  const ORACLE_LAG_SECONDS = 3; // Tune via backtest/tune; fixed for precision
 
   // Refresh thresholds every 60s
   setInterval(async () => {
@@ -278,10 +279,7 @@ async function main() {
     try {
       const { adapter, decimals, scaleFactor, feedAddr } = getAdapter(MARKET.chainId, MARKET.feeds.BASE_FEED_1.address);
       const required = adapter.requiredSymbols();
-      const aggMap = await fetchAggregatedPrices(PREDICTOR_URL, required);
-      if (required.some((s) => aggMap[s] === undefined)) return;
-
-      // Read on-chain latest answer to compute offset/heartbeat decision
+      // Read on-chain latest answer to compute offset/heartbeat decision & time alignment
       let chainAns = 0;
       let updatedAt = 0;
       try {
@@ -293,8 +291,11 @@ async function main() {
         chainAns = Number(round[1]) / 10 ** decimals;
         updatedAt = Number(round[3]);
       } catch {}
-
-      const { answer, price1e36 } = adapter.compute({ agg: aggMap, decimals, scaleFactor });
+      // Precise predicted answer at (updatedAt - lag)
+      const predAt = await fetchPredictedAt(PREDICTOR_URL, MARKET.chainId, feedAddr, updatedAt, ORACLE_LAG_SECONDS);
+      const answer = predAt?.answer;
+      // For liquidation evaluation we still need 1e36 value
+      const price1e36 = predAt?.price1e36 as any;
       if (answer === undefined || price1e36 === undefined) return;
 
       const now = Math.floor(Date.now() / 1000);

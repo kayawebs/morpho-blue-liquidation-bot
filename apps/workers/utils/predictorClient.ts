@@ -13,3 +13,22 @@ export async function fetchAggregatedPrices(predictorUrl: string, symbols: strin
   return out;
 }
 
+export async function fetchPredictedAt(
+  predictorUrl: string,
+  chainId: number,
+  oracleAddr: string,
+  tsSec: number,
+  lagSeconds: number,
+): Promise<{ answer?: number; price1e36?: string; at: number } | undefined> {
+  try {
+    const url = new URL(`/oracles/${chainId}/${oracleAddr}/predictionAt`, predictorUrl);
+    url.searchParams.set('ts', String(tsSec));
+    if (lagSeconds) url.searchParams.set('lag', String(lagSeconds));
+    const res = await fetch(url);
+    if (!res.ok) return undefined;
+    const data = await res.json();
+    return { answer: Number(data?.answer), price1e36: data?.price1e36, at: Number(data?.at) };
+  } catch {
+    return undefined;
+  }
+}
