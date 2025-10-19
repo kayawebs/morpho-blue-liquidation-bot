@@ -6,15 +6,11 @@ import {
   createWalletClient,
   http,
   webSocket,
-  type Hash,
   type Address,
   getAbiItem,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { AlchemyMempoolMonitor } from "../client/src/mempool/AlchemyMempoolMonitor.js";
-import { analyzeMorphoPendingTx } from "../client/src/fastpath/index.js";
-import { tryDecodeOcr2AnswerFromInput } from "../client/src/oracle-ocr/decoder.js";
 import { getAdapter } from "./oracleAdapters/registry.js";
 import { fetchAggregatedPrices } from "./utils/predictorClient.js";
 import { fetchOracleConfig } from "./utils/predictorConfigClient.js";
@@ -235,104 +231,13 @@ async function main() {
     return out;
   }
 
-  // Build watchlist: only Morpho + underlying feeds
-  const watchAddresses = new Set<Address>([
-    MARKET.morphoAddress,
-    MARKET.feeds.BASE_FEED_1.address, // only real writer
-  ]);
-
-  const ENABLE_MEMPOOL = process.env.WORKER_MEMPOOL === '1' || process.env.ENABLE_MEMPOOL === '1';
-  let monitor: AlchemyMempoolMonitor | undefined;
-  if (ENABLE_MEMPOOL) {
-  monitor = new AlchemyMempoolMonitor({
-    client: publicClient as any,
-    morphoAddress: MARKET.morphoAddress,
-    oracleAddresses: watchAddresses,
-    pollingInterval: 200,
-    wsUrl: cfg.wsRpcUrl,
-    useAlchemyFilter: !!cfg.wsRpcUrl && cfg.wsRpcUrl.includes("alchemy.com"),
-    onPendingTransaction: async (txHash: Hash, tx: { to?: Address; input?: `0x${string}` }) => {
-      if (!tx.to) return;
-      try {
-        if (tx.to.toLowerCase() === MARKET.morphoAddress.toLowerCase()) {
-          // Morpho fast-path: predict borrower risk increase
-          const analysis = await analyzeMorphoPendingTx(
-            publicClient as any,
-            MARKET.morphoAddress,
-            { to: tx.to, input: tx.input },
-          );
-          if (analysis?.market && analysis.position && analysis.position.seizableCollateral > 0n) {
-            console.log(
-              `🚨 Fast-path (Morpho) candidate ${analysis.position.user} seizable=${analysis.position.seizableCollateral.toString()}`,
-            );
-            await liquidator.liquidateSingle(analysis.market, analysis.position as any);
-          }
-          return;
-        }
-
-        // Oracle fast-path: detect OCR transmit on underlying feeds and derive composite price
-        if (watchAddresses.has(tx.to)) {
-          const label = Object.entries(MARKET.feeds).find(([, f]) =>
-            f.address.toLowerCase() === tx.to!.toLowerCase(),
-          )?.[0];
-          console.log(`📡 OCR transmit detected on ${label ?? "feed"}: ${txHash}`);
-
-          // Only BASE_FEED_1 is active; others are zero address.
-          const decoded = tryDecodeOcr2AnswerFromInput(tx.input as any);
-          if (!decoded?.answer) return;
-          const answer = decoded.answer; // int192 scaled by aggregator decimals (8)
-          const predictedPrice = MARKET.scaleFactor * answer; // 1e36-scaled as per oracle contract
-          console.log(`💡 Predicted cbBTC/USDC price (1e36): ${predictedPrice.toString()}`);
-
-          // With predictedPrice, recompute target market candidate positions and liquidate if profitable.
-          const [params, view] = await Promise.all([getMarketParams(), getMarketView()]);
-          const marketObj = new Market({
-            chainId: MARKET.chainId,
-            id: MARKET.marketId as any,
-            params: new MarketParams(params),
-            price: predictedPrice,
-            totalSupplyAssets: view.totalSupplyAssets,
-            totalSupplyShares: view.totalSupplyShares,
-            totalBorrowAssets: view.totalBorrowAssets,
-            totalBorrowShares: view.totalBorrowShares,
-            lastUpdate: view.lastUpdate,
-            fee: view.fee,
-          }).accrueInterest(Math.floor(Date.now() / 1000).toString());
-
-          const batch = pickBatch();
-          for (const user of batch) {
-            try {
-              const p = await getUserPosition(user);
-              if (p.borrowShares === 0n) continue;
-              const iposition: IAccrualPosition = {
-                chainId: MARKET.chainId,
-                marketId: MARKET.marketId as any,
-                user,
-                supplyShares: p.supplyShares,
-                borrowShares: p.borrowShares,
-                collateral: p.collateral,
-              };
-              const seizable = new AccrualPosition(iposition, marketObj).seizableCollateral ?? 0n;
-              if (seizable > 0n) {
-                console.log(`🎯 Candidate liquidatable: ${user} seizable=${seizable.toString()}`);
-                await liquidator.liquidateSingle(marketObj, { ...iposition, seizableCollateral: seizable } as any);
-              }
-            } catch {}
-          }
-        }
-      } catch (err) {
-        console.error("❌ Worker error handling pending tx:", err);
-      }
-    },
-  });
-  }
+  // Note: mempool fast-path removed (Base/Flashbots无法可靠观察到 transmit)。
 
   // Initial candidates fetch + schedule refresh
   await fetchCandidates();
   setInterval(fetchCandidates, CANDIDATE_REFRESH_MS);
 
-  await monitor.start();
-  console.log("✅ Worker running. Listening for Morpho & Oracle pending tx...");
+  console.log("✅ Worker running. Using Predictor thresholds only (no mempool)");
 
   // Predictor-trigger: always on
   const PREDICTOR_URL = "http://localhost:48080";
@@ -468,14 +373,8 @@ async function main() {
   metricsServer.listen(48100, () => console.log("📊 Worker metrics on :48100/metrics"));
 
   // Graceful shutdown
-  process.on("SIGINT", () => {
-    if (monitor) monitor.stop();
-    process.exit(0);
-  });
-  process.on("SIGTERM", () => {
-    if (monitor) monitor.stop();
-    process.exit(0);
-  });
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
 }
 
 main().catch((e) => {
