@@ -11,6 +11,13 @@ function median(nums: number[]): number | undefined {
   return arr[idx];
 }
 
+function percentile(nums: number[], p: number): number | undefined {
+  if (nums.length === 0) return undefined;
+  const arr = [...nums].sort((a, b) => a - b);
+  const idx = Math.min(arr.length - 1, Math.max(0, Math.floor((arr.length - 1) * p)));
+  return arr[idx];
+}
+
 async function calibrateOracle(chainId: number, oracle: string) {
   const cfg = loadConfig();
   const rpc = cfg.rpc[String(chainId)];
@@ -27,7 +34,9 @@ async function calibrateOracle(chainId: number, oracle: string) {
   );
   if (rows.length === 0) return false;
   const errors = rows.map((r) => Math.abs(Number(r.error_bps))).filter((x) => Number.isFinite(x));
-  const offset_bps = Math.max(1, Math.round(median(errors) ?? 50));
+  // Use a conservative percentile to avoid noisy frequent triggers (e.g., p90)
+  const p90 = percentile(errors, 0.9);
+  const offset_bps = Math.max(5, Math.round((p90 ?? median(errors) ?? 50)));
   // Use event_ts if present; fallback to fetching block timestamps
   let times: number[] = rows.map((r) => Number(r.ts)).filter((t) => Number.isFinite(t));
   if (times.length !== rows.length) {
@@ -44,6 +53,7 @@ async function calibrateOracle(chainId: number, oracle: string) {
   }
   const gapsSec: number[] = [];
   for (let i = 1; i < times.length; i++) gapsSec.push(times[i]! - times[i - 1]!);
+  // Heartbeat: median gap is a good estimator of cadence
   const hb = Math.max(10, Math.round(median(gapsSec) ?? 60));
   // Upsert into oracle_pred_config; keep decimals/scale if exist
   await pool.query(
@@ -53,7 +63,7 @@ async function calibrateOracle(chainId: number, oracle: string) {
      ON CONFLICT (chain_id, oracle_addr) DO UPDATE SET heartbeat_seconds=EXCLUDED.heartbeat_seconds, offset_bps=EXCLUDED.offset_bps, updated_at=now()`,
     [chainId, oracle, hb, offset_bps],
   );
-  console.log(`Calibrated oracle ${oracle} on chain ${chainId}: heartbeat=${hb}s, offset=${offset_bps}bps`);
+  console.log(`Calibrated oracle ${oracle} on chain ${chainId}: heartbeat=${hb}s, offset(p90)=${offset_bps}bps`);
   return true;
 }
 

@@ -252,6 +252,7 @@ async function main() {
   let prevDeltaBps = 0;
   let prevAge = 0;
   let prevUpdatedAt = 0;
+  let triggeredOffsetRoundAt = -1; // updatedAt of the round when offset last triggered
 
   // Refresh thresholds every 60s
   setInterval(async () => {
@@ -302,13 +303,18 @@ async function main() {
       // Only trigger on rising-edge (crossing) to avoid spamming per-second
       const crossedOffset = Math.abs(prevDeltaBps) < dynamicOffsetBps && Math.abs(deltaBps) >= dynamicOffsetBps;
       const crossedHeartbeat = (updatedAt === prevUpdatedAt) && (prevAge < dynamicHeartbeat && age >= dynamicHeartbeat);
-      if (!(crossedOffset || crossedHeartbeat)) {
+      // Only allow one offset trigger per on-chain round (updatedAt)
+      const allowOffsetThisRound = updatedAt !== triggeredOffsetRoundAt;
+      const fireOffset = crossedOffset && allowOffsetThisRound;
+      const fireHb = crossedHeartbeat;
+      if (!(fireOffset || fireHb)) {
         prevDeltaBps = deltaBps;
         prevAge = age;
         prevUpdatedAt = updatedAt;
         return;
       }
       predictorTriggers++;
+      if (fireOffset) triggeredOffsetRoundAt = updatedAt;
 
       // With predicted price, recompute target market candidate positions and liquidate if profitable.
       const [params, view] = await Promise.all([getMarketParams(), getMarketView()]);
