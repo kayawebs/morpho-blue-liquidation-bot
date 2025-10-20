@@ -24,9 +24,31 @@ async function main() {
 
   console.log(`FAST_ONLY_MARKETS=${fast}`);
 
-  const startWithSchema = (schema) => new Promise((resolveExit) => {
+  const detectSchemaHasTables = async (schema) => {
+    try {
+      const { Client } = await import('pg');
+      const url = process.env.POSTGRES_DATABASE_URL ?? 'postgres://ponder:ponder@localhost:5432/ponder';
+      const client = new Client({ connectionString: url });
+      await client.connect();
+      const r = await client.query(
+        `SELECT COUNT(*)::int AS n
+         FROM information_schema.tables WHERE table_schema=$1`,
+        [schema],
+      );
+      await client.end();
+      return Number(r.rows?.[0]?.n ?? 0) > 0;
+    } catch (e) {
+      console.warn('⚠️ Could not inspect schema for resume detection; defaulting to lookback.', e?.message ?? e);
+      return false;
+    }
+  };
+
+  const startWithSchema = async (schema) => new Promise(async (resolveExit) => {
     const env = { ...baseEnv, DATABASE_SCHEMA: schema, PONDER_DB_SCHEMA: schema };
-    console.log(`Using Ponder schema: ${schema}`);
+    // If schema already has tables, resume from DB (disable fast lookback). Else use configured/default lookback.
+    const hasData = await detectSchemaHasTables(schema);
+    env.FAST_LOOKBACK_BLOCKS = hasData ? '0' : (process.env.FAST_LOOKBACK_BLOCKS ?? '10000');
+    console.log(`Using Ponder schema: ${schema} (hasData=${hasData}, LOOKBACK=${env.FAST_LOOKBACK_BLOCKS})`);
     const child = spawn('npx', ['ponder', 'start'], {
       cwd: resolve(process.cwd(), 'apps/ponder'),
       stdio: ['inherit', 'pipe', 'pipe'],

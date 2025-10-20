@@ -1,6 +1,8 @@
 import { chainConfig, chainConfigs } from "@morpho-blue-liquidation-bot/config";
 import { createConfig, factory } from "ponder";
 import { type AbiEvent, getAbiItem, createPublicClient, http } from "viem";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { adaptiveCurveIrmAbi } from "./abis/AdaptiveCurveIrm";
 import { metaMorphoAbi } from "./abis/MetaMorpho";
@@ -13,11 +15,32 @@ const configs = Object.values(chainConfigs).map((config) => chainConfig(config.c
 // Optional fast-lookback override to reduce initial history scanned.
 const LOOKBACK = Number(process.env.FAST_LOOKBACK_BLOCKS ?? "0");
 const latestByChain: Record<string, number> = {};
-if (LOOKBACK > 0) {
+
+async function computeLatestHeads() {
   for (const cfg of configs) {
     const client = createPublicClient({ chain: cfg.chain, transport: http(cfg.rpcUrl) });
     const latest = await client.getBlockNumber();
     latestByChain[cfg.chain.name] = Number(latest);
+  }
+}
+
+const FREEZE = process.env.PONDER_FREEZE_HEAD === '1';
+const headPath = resolve(process.cwd(), '.ponder-head.json');
+if (LOOKBACK > 0) {
+  if (FREEZE && existsSync(headPath)) {
+    try {
+      const saved = JSON.parse(readFileSync(headPath, 'utf8')) as Record<string, number>;
+      Object.assign(latestByChain, saved);
+      console.log(`Using frozen heads from .ponder-head.json`);
+    } catch {
+      await computeLatestHeads();
+      try { writeFileSync(headPath, JSON.stringify(latestByChain, null, 2)); } catch {}
+    }
+  } else {
+    await computeLatestHeads();
+    if (FREEZE) {
+      try { writeFileSync(headPath, JSON.stringify(latestByChain, null, 2)); } catch {}
+    }
   }
 }
 const sb = (chainName: string, orig: number) =>
