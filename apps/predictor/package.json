@@ -10,7 +10,7 @@
     "calibrate": "tsx src/calibrate/fit.ts",
     "tune": "tsx src/calibrate/tune.ts",
     "start": "tsx src/index.ts",
-    "start:proxy": "tsx src/index.ts",
+    "manual-calibrate": "tsx src/tools/manual-calibrate.ts",
     "test:connectivity": "tsx src/tools/test-connectivity.ts",
     "test:ws": "tsx src/tools/test-ws.ts"
   },

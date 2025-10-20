@@ -22,9 +22,11 @@ export async function initSchema() {
       offset_bps INTEGER NOT NULL,
       decimals INTEGER NOT NULL,
       scale_factor NUMERIC NOT NULL,
+      lag_seconds INTEGER NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (chain_id, oracle_addr)
     );
+    ALTER TABLE oracle_pred_config ADD COLUMN IF NOT EXISTS lag_seconds INTEGER NOT NULL DEFAULT 0;
 
     CREATE TABLE IF NOT EXISTS oracle_pred_samples (
       id BIGSERIAL PRIMARY KEY,
@@ -40,6 +42,16 @@ export async function initSchema() {
     );
     ALTER TABLE oracle_pred_samples ADD COLUMN IF NOT EXISTS event_ts TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_oracle_samples_addr_ts ON oracle_pred_samples(oracle_addr, event_ts DESC);
+
+    -- Per-oracle CEX weights
+    CREATE TABLE IF NOT EXISTS oracle_cex_weights (
+      chain_id INTEGER NOT NULL,
+      oracle_addr TEXT NOT NULL,
+      source TEXT NOT NULL,
+      weight NUMERIC NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (chain_id, oracle_addr, source)
+    );
   `);
 }
 

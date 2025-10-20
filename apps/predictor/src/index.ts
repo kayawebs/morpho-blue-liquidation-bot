@@ -9,6 +9,8 @@ import { buildApp } from './service.js';
 import { serve } from '@hono/node-server';
 import { loadConfig } from './config.js';
 import { runBackfillIfNeeded } from './backfill.js';
+import { startOracleWatcher } from './oracleWatcher.js';
+import { startAutoCalibrateScheduler } from './autoCalibrate.js';
 
 async function main() {
   // Fetch proxy is applied per-request inside HttpPollConnector.
@@ -16,6 +18,8 @@ async function main() {
   const cfg = loadConfig();
   // Backfill recent CEX prices if local history is missing/stale to enable immediate backtest/calibrate.
   await runBackfillIfNeeded();
+  // Start oracle transmit watcher (polling) to continuously build samples
+  await startOracleWatcher();
   const agg = new PriceAggregator(
     cfg.aggregator.windowMs ?? 3000,
     cfg.aggregator.trimRatio ?? 0.2,
@@ -42,6 +46,8 @@ async function main() {
   const port = Number(cfg.service.port ?? 48080);
   serve({ fetch: app.fetch, port });
   console.log(`🛰 Predictor service listening on :${port}`);
+  // Start periodic auto-calibration (runs in background)
+  startAutoCalibrateScheduler();
 }
 
 main().catch((e) => {
