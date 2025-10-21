@@ -8,7 +8,8 @@
     "ponder:start": "node scripts/ponder-fast.mjs",
     "worker:base:cbbtc_usdc": "pnpm build:config && tsx apps/workers/base_cbbtc_usdc.ts --env-file=.env",
     "predictor:start": "pnpm --filter @morpho-blue-liquidation-bot/predictor start",
-    "predictor:calibrate": "pnpm --filter @morpho-blue-liquidation-bot/predictor manual-calibrate"
+    "predictor:calibrate": "pnpm --filter @morpho-blue-liquidation-bot/predictor manual-calibrate",
+    "scheduler:start": "pnpm --filter @morpho-blue-liquidation-bot/oracle-scheduler start"
   },
   "lint-staged": {
     "*.ts": [

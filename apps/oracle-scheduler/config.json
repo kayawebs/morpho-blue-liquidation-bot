@@ -1,0 +1,13 @@
+{
+  "feeds": [
+    {
+      "chainId": 8453,
+      "symbol": "BTCUSDC",
+      "aggregator": "0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8",
+      "feed": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
+      "heartbeatSeconds": 1200,
+      "deviationBps": 10
+    }
+  ]
+}
+
