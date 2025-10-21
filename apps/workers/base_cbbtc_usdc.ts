@@ -253,7 +253,7 @@ async function main() {
   let prevAge = 0;
   let prevUpdatedAt = 0;
   let triggeredOffsetRoundAt = -1; // updatedAt of the round when offset last triggered
-  const ORACLE_LAG_SECONDS = 3; // Tune via backtest/tune; fixed for precision
+  let dynamicLagSeconds = 3; // from predictor /oracles (lag_seconds), fallback 3
 
   // Refresh thresholds every 60s
   setInterval(async () => {
@@ -264,6 +264,9 @@ async function main() {
         const changed = th.offsetBps !== dynamicOffsetBps || th.heartbeatSeconds !== dynamicHeartbeat;
         dynamicOffsetBps = th.offsetBps;
         dynamicHeartbeat = th.heartbeatSeconds;
+        if (th.lagSeconds !== undefined && th.lagSeconds !== dynamicLagSeconds) {
+          dynamicLagSeconds = th.lagSeconds;
+        }
         if (changed) {
           console.log(
             `🔧 [Predictor] Thresholds refreshed: offset=${dynamicOffsetBps}bps, heartbeat=${dynamicHeartbeat}s`,
@@ -292,7 +295,7 @@ async function main() {
         updatedAt = Number(round[3]);
       } catch {}
       // Precise predicted answer at (updatedAt - lag)
-      const predAt = await fetchPredictedAt(PREDICTOR_URL, MARKET.chainId, feedAddr, updatedAt, ORACLE_LAG_SECONDS);
+      const predAt = await fetchPredictedAt(PREDICTOR_URL, MARKET.chainId, feedAddr, updatedAt, dynamicLagSeconds);
       const answer = predAt?.answer;
       // For liquidation evaluation we still need 1e36 value
       const price1e36 = predAt?.price1e36 as any;

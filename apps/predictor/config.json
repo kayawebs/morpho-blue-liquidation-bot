@@ -29,6 +29,9 @@
     {
       "chainId": 8453,
       "address": "0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8",
+      "feedAddress": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
+      "feedDeviationBps": 10,
+      "feedHeartbeatSeconds": 1200,
       "type": "single",
       "symbol": "BTCUSDC",
       "decimals": 8,

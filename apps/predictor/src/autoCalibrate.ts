@@ -71,12 +71,15 @@ export async function runAutoCalibrateOnce() {
     const chainId = Number(o.chainId);
     const addr = String(o.address);
     const symbol = String(o.symbol ?? 'BTCUSDC');
+    const feedHb = Number(o.feedHeartbeatSeconds);
+    const feedOffset = Number(o.feedDeviationBps);
     // Heartbeat from event gaps
     const events = await fetchEvents(chainId, addr, 2000);
     const ts = events.map((e) => e.ts).sort((a, b) => a - b);
     const gaps: number[] = [];
     for (let i = 1; i < ts.length; i++) gaps.push(ts[i]! - ts[i - 1]!);
-    const hb = Math.max(10, Math.round(median(gaps) ?? 60));
+    // Heartbeat: if feed-specified present, respect it; else compute
+    const hb = Number.isFinite(feedHb) ? feedHb : Math.max(10, Math.round(median(gaps) ?? 60));
     // Tune lag/weights with a coarse grid to avoid heavy runtime
     const lags = [0, 1, 2, 3, 5, 7, 10];
     const subsetCombos = combos(sources).filter((c) => c.length >= 1);
@@ -120,7 +123,8 @@ export async function runAutoCalibrateOnce() {
       }
     }
     if (!best) continue;
-    const offset = Math.max(5, Math.round(best.p90));
+    // Offset: if feed-specified present, respect it; else compute from residual p90 with floor
+    const offset = Number.isFinite(feedOffset) ? feedOffset : Math.max(5, Math.round(best.p90));
     // Persist results
     await pool.query(
       `INSERT INTO oracle_pred_config(chain_id, oracle_addr, heartbeat_seconds, offset_bps, decimals, scale_factor, lag_seconds, updated_at)
@@ -148,4 +152,3 @@ export function startAutoCalibrateScheduler(intervalMs = 15 * 60_000) {
   };
   run();
 }
-

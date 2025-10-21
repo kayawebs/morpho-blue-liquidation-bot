@@ -11,6 +11,7 @@ import { loadConfig } from './config.js';
 import { runBackfillIfNeeded } from './backfill.js';
 import { startOracleWatcher } from './oracleWatcher.js';
 import { startAutoCalibrateScheduler } from './autoCalibrate.js';
+import { seedOracleThresholdsFromConfig } from './seedThresholds.js';
 
 async function main() {
   // Fetch proxy is applied per-request inside HttpPollConnector.
@@ -18,6 +19,8 @@ async function main() {
   const cfg = loadConfig();
   // Backfill recent CEX prices if local history is missing/stale to enable immediate backtest/calibrate.
   await runBackfillIfNeeded();
+  // Seed feed thresholds from config if provided (deviation/heartbeat pinned by feed owner)
+  await seedOracleThresholdsFromConfig();
   // Start oracle transmit watcher (polling) to continuously build samples
   await startOracleWatcher();
   const agg = new PriceAggregator(

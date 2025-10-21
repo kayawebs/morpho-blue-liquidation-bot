@@ -57,7 +57,7 @@ export function buildApp(deps: PredictorDeps) {
   });
 
   app.get('/oracles', async (c) => {
-    const { rows } = await pool.query('SELECT chain_id, oracle_addr, heartbeat_seconds, offset_bps, decimals, scale_factor FROM oracle_pred_config');
+    const { rows } = await pool.query('SELECT chain_id, oracle_addr, heartbeat_seconds, offset_bps, decimals, scale_factor, lag_seconds FROM oracle_pred_config');
     return c.json(rows);
   });
 
