@@ -6,7 +6,9 @@
   "scripts": {
     "build:config": "pnpm --filter @morpho-blue-liquidation-bot/config build",
     "ponder:start": "node scripts/ponder-fast.mjs",
-    "worker:base:cbbtc_usdc": "pnpm build:config && tsx apps/workers/base_cbbtc_usdc.ts --env-file=.env",
+    "worker:base:cbbtc_usdc": "pnpm build:config && tsx apps/workers/base_cbbtc_usdc.ts",
+    "worker:confirmed:base:cbbtc_usdc": "pnpm build:config && tsx apps/workers/base_cbbtc_usdc_confirmed.ts",
+    "worker:predictive:base:cbbtc_usdc": "pnpm build:config && tsx apps/workers/base_cbbtc_usdc_predictive.ts",
     "predictor:start": "pnpm --filter @morpho-blue-liquidation-bot/predictor start",
     "predictor:calibrate": "pnpm --filter @morpho-blue-liquidation-bot/predictor manual-calibrate",
     "scheduler:start": "pnpm --filter @morpho-blue-liquidation-bot/oracle-scheduler start"
