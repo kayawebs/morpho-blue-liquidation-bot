@@ -204,6 +204,35 @@ contract GuardedLiquidator {
         }
     }
 
+    // Generic helper to execute encoded callbacks: (bytes[] callbacks, bytes extra)
+    function _execCallbacks(bytes calldata data) internal {
+        (bytes[] memory cbs, ) = abi.decode(data, (bytes[], bytes));
+        unchecked {
+            for (uint256 i = 0; i < cbs.length; i++) {
+                (bool ok, bytes memory ret) = address(this).call(cbs[i]);
+                if (!ok) {
+                    assembly { revert(add(ret, 0x20), mload(ret)) }
+                }
+            }
+        }
+    }
+
+    // Uniswap V3 callback
+    function uniswapV3SwapCallback(int256, int256, bytes calldata data) external {
+        _execCallbacks(data);
+    }
+
+    // Morpho Blue callbacks
+    function onMorphoLiquidate(uint256, bytes calldata data) external {
+        _execCallbacks(data);
+    }
+    function onMorphoRepay(uint256, bytes calldata data) external {
+        _execCallbacks(data);
+    }
+    function onMorphoFlashLoan(uint256, bytes calldata data) external {
+        _execCallbacks(data);
+    }
+
     // Owner sweep functions to collect profits
     function sweep(address token, address payable to, uint256 amount) external onlyOwner {
         require(to != address(0), "zero");
