@@ -1,6 +1,6 @@
-import { chainConfig } from "../config/dist/index.js";
+import { chainConfig, chainConfigs } from "../config/dist/index.js";
 import { base } from "viem/chains";
-import { createPublicClient, createWalletClient, http, webSocket, type Address } from "viem";
+import { createPublicClient, createWalletClient, http, webSocket, type Address, maxUint256, encodeFunctionData } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import WebSocket from "ws";
 import { readContract } from "viem/actions";
@@ -13,6 +13,8 @@ import { getAdapter } from "./oracleAdapters/registry.js";
 import { fetchPredictedAt } from "./utils/predictorClient.js";
 import { fetchOracleConfig } from "./utils/predictorConfigClient.js";
 import { AGGREGATOR_V2V3_ABI } from "./utils/chainlinkAbi.js";
+import { LiquidationEncoder } from "../client/src/utils/LiquidationEncoder.js";
+import { WAD, wMulDown } from "../client/src/utils/maths.js";
 
 // 预测型策略：由 oracle-scheduler 的 WS 推送驱动，
 // 在偏差/心跳窗口内用预测价快速评估清算并发起交易（适合大额）。
@@ -36,18 +38,26 @@ async function main() {
 
   const basePricer = new BaseChainlinkPricer();
   const uniswapV3Venue = new UniswapV3Venue();
-  const liquidator = new LiquidationBot({
-    logTag: "⚡ predictive ",
-    chainId: MARKET.chainId,
-    client: walletClient as any,
-    morphoAddress: MARKET.morphoAddress,
-    wNative: cfg.wNative,
-    vaultWhitelist: [],
-    additionalMarketsWhitelist: [MARKET.marketId],
-    executorAddress: cfg.executorAddress,
-    liquidityVenues: [uniswapV3Venue],
-    pricers: [basePricer],
-  });
+  // 预测型改用 GuardedLiquidator 合约执行（不使用旧 executor）
+  function parseList(key: string): string[] | undefined {
+    const v = process.env[key];
+    if (!v) return undefined;
+    const arr = v.split(",").map((s) => s.trim()).filter(Boolean);
+    return arr.length ? arr : undefined;
+  }
+  const multiGuardAddrs = parseList(`GUARD_ADDRESSES_${MARKET.chainId}`) ?? parseList(`EXECUTOR_ADDRESSES_${MARKET.chainId}`);
+  const multiPrivKeys = parseList(`LIQUIDATION_PRIVATE_KEYS_${MARKET.chainId}`);
+  const guardPairs: { addr: Address; wc: any }[] = [];
+  if (multiGuardAddrs && multiPrivKeys && multiGuardAddrs.length === multiPrivKeys.length) {
+    for (let i = 0; i < multiGuardAddrs.length; i++) {
+      const wc = createWalletClient({ chain: base, transport: http(cfg.rpcUrl), account: privateKeyToAccount(multiPrivKeys[i]! as any) });
+      guardPairs.push({ addr: multiGuardAddrs[i]! as Address, wc });
+    }
+    console.log(`🔱 多Guard执行器配置: ${guardPairs.length} 个`);
+  } else {
+    console.warn("⚠️ 未配置 GUARD_ADDRESSES/LIQUIDATION_PRIVATE_KEYS，预测型将使用单一执行私钥但无法发送（建议配置）");
+    guardPairs.push({ addr: cfg.executorAddress as Address, wc: walletClient as any });
+  }
 
   // 候选账户（与确认型相同）
   const PONDER_API_URL = "http://localhost:42069";
@@ -186,7 +196,8 @@ async function main() {
     }).accrueInterest(String(now));
 
     const batch = pickBatch();
-    let attempts = 0; let successes = 0;
+    // 预筛选候选并按可清算规模降序，最多 guardPairs.length 个并行
+    const viable: { user: Address; seizable: bigint; p: any }[] = [];
     for (const user of batch) {
       try {
         const p = await readContract(publicClient as any, { address: MARKET.morphoAddress, abi: morphoBlueAbi, functionName: "position", args: [MARKET.marketId, user] });
@@ -194,16 +205,79 @@ async function main() {
         const iposition = { chainId: MARKET.chainId, marketId: MARKET.marketId as any, user, supplyShares: (p as any).supplyShares, borrowShares: (p as any).borrowShares, collateral: (p as any).collateral } as any;
         const { AccrualPosition } = await import("@morpho-org/blue-sdk");
         const seizable = new AccrualPosition(iposition, marketObj).seizableCollateral ?? 0n;
-        if (seizable > 0n) {
-          attempts++;
-          const ok = await liquidator.liquidateSingle(marketObj, { ...iposition, seizableCollateral: seizable } as any);
-          if (ok) successes++;
-        }
+        if (seizable > 0n) viable.push({ user, seizable, p });
       } catch {}
+      if (viable.length >= guardPairs.length) break;
     }
-    if (attempts > 0) {
-      console.log(`⚡ [Predictive] window触发(${win.state ?? 'n/a'}): attempts=${attempts}, successes=${successes}`);
-    }
+    viable.sort((a, b) => (a.seizable === b.seizable ? 0 : a.seizable > b.seizable ? -1 : 1));
+    const selected = viable.slice(0, guardPairs.length);
+
+    // 每个 Guard 合约派发一个目标
+    const results = await Promise.all(selected.map(async (v, idx) => {
+      try {
+        // 构建 calls（以 Guard 地址作为 encoder.address）
+        const guard = guardPairs[idx]!;
+        const encoder = new LiquidationEncoder(guard.addr, guard.wc);
+        // seizable 缓冲
+        const bufBps = chainConfigs[MARKET.chainId]?.options.liquidationBufferBps ?? 10;
+        const decr = (s: bigint, col: bigint) => s === col ? s : wMulDown(s, WAD - BigInt(bufBps) * (WAD / 10_000n));
+        const seizableAdj = decr(v.seizable, (v.p as any).collateral ?? 0n);
+        // 转换 + 清算
+        let toConvert = { src: (params as any).collateralToken as Address, dst: (params as any).loanToken as Address, srcAmount: seizableAdj };
+        if (await uniswapV3Venue.supportsRoute(encoder as any, toConvert.src, toConvert.dst)) {
+          toConvert = await uniswapV3Venue.convert(encoder as any, toConvert);
+        }
+        encoder.erc20Approve((params as any).loanToken, MARKET.morphoAddress, maxUint256);
+        encoder.morphoBlueLiquidate(
+          MARKET.morphoAddress,
+          { ...params, lltv: BigInt((params as any).lltv) },
+          v.user,
+          seizableAdj,
+          0n,
+          encoder.flush(),
+        );
+        const calls = encoder.flush();
+
+        // 构造门控参数（prevRoundId, priceHint 等）
+        const round: any = await (publicClient as any).readContract({ address: MARKET.aggregator, abi: AGGREGATOR_V2V3_ABI, functionName: 'latestRoundData' });
+        const prevRoundId = Number(round[0]);
+        const { decimals } = getAdapter(MARKET.chainId, MARKET.aggregator);
+        const priceHint = BigInt(Math.round(Number(pred.answer ?? 0) * 10 ** decimals));
+        const maxDevBps = offsetBps;
+        const maxAgeSec = 120; // 可调：也可从 env 读取
+        const profitToken = (params as any).loanToken as Address; // USDC
+        const minProfit = 100_000n; // 0.1 USDC（6 decimals）
+        const deadline = BigInt(now + 60);
+
+        // simulate + 发送
+        const { simulateCalls, writeContract, getGasPrice } = await import("viem/actions");
+        const [{ results }, gasPrice] = await Promise.all([
+          simulateCalls(guard.wc, {
+            account: guard.wc.account.address,
+            calls: [
+              { to: profitToken, abi: (await import('viem')).erc20Abi, functionName: 'balanceOf', args: [guard.addr] },
+              { to: guard.addr, data: encodeFunctionData({ abi: [
+                { inputs: [ { type: 'bytes[]', name: 'data' }, { type: 'uint256', name: 'priceHint' }, { type: 'uint16', name: 'maxDevBps' }, { type: 'uint32', name: 'maxAgeSec' }, { type: 'uint80', name: 'prevRoundId' }, { type: 'address', name: 'profitToken' }, { type: 'uint256', name: 'minProfit' }, { type: 'uint256', name: 'deadline' } ], name: 'execEncoded', outputs: [], stateMutability: 'payable', type: 'function' }
+              ], functionName: 'execEncoded', args: [calls, priceHint, maxDevBps, maxAgeSec, BigInt(prevRoundId), profitToken, minProfit, deadline] }) },
+              { to: profitToken, abi: (await import('viem')).erc20Abi, functionName: 'balanceOf', args: [guard.addr] },
+            ],
+          }),
+          getGasPrice(guard.wc),
+        ]);
+        if (results[1].status !== 'success') return false;
+        // 发送 tx
+        await writeContract(guard.wc, { address: guard.addr, abi: [
+          { inputs: [ { type: 'bytes[]', name: 'data' }, { type: 'uint256', name: 'priceHint' }, { type: 'uint16', name: 'maxDevBps' }, { type: 'uint32', name: 'maxAgeSec' }, { type: 'uint80', name: 'prevRoundId' }, { type: 'address', name: 'profitToken' }, { type: 'uint256', name: 'minProfit' }, { type: 'uint256', name: 'deadline' } ], name: 'execEncoded', outputs: [], stateMutability: 'payable', type: 'function' }
+        ] as any, functionName: 'execEncoded', args: [calls, priceHint, maxDevBps, maxAgeSec, BigInt(prevRoundId), profitToken, minProfit, deadline] });
+        return true;
+      } catch (e) {
+        console.warn('guard attempt error', e);
+        return false;
+      }
+    }));
+    const attempts = selected.length;
+    const successes = results.filter(Boolean).length;
+    if (attempts > 0) console.log(`⚡ [Predictive] window触发(${win.state ?? 'n/a'}): attempts=${attempts}, successes=${successes}`);
   }, 1000);
 
   await fetchCandidates();
