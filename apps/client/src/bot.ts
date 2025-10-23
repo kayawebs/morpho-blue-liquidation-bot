@@ -39,6 +39,7 @@ export interface LiquidationBotInputs {
   executorAddress: Address;
   liquidityVenues: LiquidityVenue[];
   pricers?: Pricer[];
+  minProfitUsd?: number; // optional absolute USD profit threshold
 }
 
 export class LiquidationBot {
@@ -52,6 +53,7 @@ export class LiquidationBot {
   private executorAddress: Address;
   private liquidityVenues: LiquidityVenue[];
   private pricers?: Pricer[];
+  private minProfitUsd: number;
 
   constructor(inputs: LiquidationBotInputs) {
     this.logTag = inputs.logTag;
@@ -64,6 +66,7 @@ export class LiquidationBot {
     this.executorAddress = inputs.executorAddress;
     this.liquidityVenues = inputs.liquidityVenues;
     this.pricers = inputs.pricers;
+    this.minProfitUsd = inputs.minProfitUsd ?? 0.1; // default $0.1
   }
 
   async run() {
@@ -331,7 +334,7 @@ export class LiquidationBot {
 
     const profitUsd = loanAssetProfitUsd - gasUsedUsd;
 
-    return profitUsd > 0;
+    return profitUsd >= this.minProfitUsd;
   }
 
   private decreaseSeizableCollateral(seizableCollateral: bigint, collateral: bigint) {
