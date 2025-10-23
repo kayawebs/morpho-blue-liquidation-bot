@@ -143,6 +143,67 @@ contract GuardedLiquidator {
         require(postBal >= preBal + minProfit, "profit");
     }
 
+    // Same gating as exec(), but accepts encoded Executor calls (bytes[]) and executes them internally.
+    function execEncoded(
+        bytes[] calldata data,
+        uint256 priceHint,
+        uint16 maxDevBps,
+        uint32 maxAgeSec,
+        uint80 prevRoundId,
+        address profitToken,
+        uint256 minProfit,
+        uint256 deadline
+    ) external payable onlyOperator {
+        require(block.timestamp <= deadline, "deadline");
+        (uint80 roundId, int256 answer,, uint256 updatedAt,) = IAggregatorV3(aggregator).latestRoundData();
+        require(answer > 0, "bad answer");
+        require(roundId > prevRoundId, "round");
+
+        uint256 onchain = uint256(answer);
+        uint16 devBps = maxDevBps > 0 ? maxDevBps : defaultMaxDeviationBps;
+        uint32 age = maxAgeSec > 0 ? maxAgeSec : defaultMaxAgeSec;
+        require(block.timestamp - updatedAt <= age, "stale");
+        uint256 base = onchain;
+        uint256 diff = onchain > priceHint ? onchain - priceHint : priceHint - onchain;
+        uint256 bps = base == 0 ? type(uint256).max : (diff * 10_000) / base;
+        require(bps <= devBps, "deviation");
+
+        uint256 preBal;
+        if (profitToken == address(0)) {
+            preBal = address(this).balance;
+        } else {
+            preBal = IERC20(profitToken).balanceOf(address(this));
+        }
+        unchecked {
+            for (uint256 i = 0; i < data.length; i++) {
+                (bool ok, bytes memory ret) = address(this).call{ value: 0 }(data[i]);
+                if (!ok) {
+                    assembly { revert(add(ret, 0x20), mload(ret)) }
+                }
+            }
+        }
+        uint256 postBal;
+        if (profitToken == address(0)) {
+            postBal = address(this).balance;
+        } else {
+            postBal = IERC20(profitToken).balanceOf(address(this));
+        }
+        require(postBal >= preBal + minProfit, "profit");
+    }
+
+    // Minimal executor-compatible functions for venues that rely on callback execution
+    function call_g0oyU7o(address target, uint256 value, bytes32 context, bytes calldata callData) external payable {
+        // context packs: [12 bytes dataIndex][20 bytes sender]
+        address expectedSender = address(uint160(uint256(context)));
+        if (expectedSender != address(0)) {
+            require(msg.sender == expectedSender, "sender");
+        }
+        (bool ok, bytes memory ret) = target.call{ value: value }(callData);
+        if (!ok) {
+            assembly { revert(add(ret, 0x20), mload(ret)) }
+        }
+    }
+
     // Owner sweep functions to collect profits
     function sweep(address token, address payable to, uint256 amount) external onlyOwner {
         require(to != address(0), "zero");
