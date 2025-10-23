@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+interface IExecutor {
+    function exec_606BaXt(bytes[] calldata data) external payable;
+}
+
+interface IAggregatorV3 {
+    function latestRoundData()
+        external
+        view
+        returns (
+            uint80 roundId,
+            int256 answer,
+            uint256 startedAt,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        );
+
+    function decimals() external view returns (uint8);
+}
+
+// Guarded liquidator wrapper that forwards to an Executor after on-chain gates.
+// Gates: deadline, max price deviation (bps) vs Chainlink aggregator, max data age (seconds).
+contract GuardedLiquidator {
+    address public owner;
+    address public executor;
+    address public aggregator;
+    uint16 public defaultMaxDeviationBps; // e.g. 10 = 0.10%
+    uint32 public defaultMaxAgeSec;       // e.g. 120 seconds
+    uint8 public aggDecimals;             // sticky cache of aggregator decimals
+
+    mapping(address => bool) public operators; // optional additional callers
+
+    event OwnerUpdated(address indexed owner);
+    event OperatorSet(address indexed operator, bool allowed);
+    event ParamsUpdated(address executor, address aggregator, uint16 maxDevBps, uint32 maxAgeSec);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "not owner");
+        _;
+    }
+
+    modifier onlyOperator() {
+        require(msg.sender == owner || operators[msg.sender], "not operator");
+        _;
+    }
+
+    constructor(
+        address _owner,
+        address _executor,
+        address _aggregator,
+        uint16 _maxDevBps,
+        uint32 _maxAgeSec
+    ) {
+        require(_owner != address(0) && _executor != address(0) && _aggregator != address(0), "zero");
+        owner = _owner;
+        executor = _executor;
+        aggregator = _aggregator;
+        defaultMaxDeviationBps = _maxDevBps;
+        defaultMaxAgeSec = _maxAgeSec;
+        aggDecimals = IAggregatorV3(_aggregator).decimals();
+        emit OwnerUpdated(_owner);
+        emit ParamsUpdated(_executor, _aggregator, _maxDevBps, _maxAgeSec);
+    }
+
+    function setOwner(address _owner) external onlyOwner {
+        require(_owner != address(0), "zero");
+        owner = _owner;
+        emit OwnerUpdated(_owner);
+    }
+
+    function setOperator(address op, bool allowed) external onlyOwner {
+        operators[op] = allowed;
+        emit OperatorSet(op, allowed);
+    }
+
+    function setParams(
+        address _executor,
+        address _aggregator,
+        uint16 _maxDevBps,
+        uint32 _maxAgeSec
+    ) external onlyOwner {
+        if (_executor != address(0)) executor = _executor;
+        if (_aggregator != address(0)) {
+            aggregator = _aggregator;
+            aggDecimals = IAggregatorV3(_aggregator).decimals();
+        }
+        if (_maxDevBps > 0) defaultMaxDeviationBps = _maxDevBps;
+        if (_maxAgeSec > 0) defaultMaxAgeSec = _maxAgeSec;
+        emit ParamsUpdated(executor, aggregator, defaultMaxDeviationBps, defaultMaxAgeSec);
+    }
+
+    // priceHint must be scaled to aggregator decimals.
+    function exec(
+        bytes[] calldata calls,
+        uint256 priceHint,
+        uint16 maxDevBps,
+        uint32 maxAgeSec,
+        uint256 deadline
+    ) external payable onlyOperator {
+        require(block.timestamp <= deadline, "deadline");
+        (, int256 answer,, uint256 updatedAt,) = IAggregatorV3(aggregator).latestRoundData();
+        require(answer > 0, "bad answer");
+
+        uint256 onchain = uint256(answer);
+        uint16 devBps = maxDevBps > 0 ? maxDevBps : defaultMaxDeviationBps;
+        uint32 age = maxAgeSec > 0 ? maxAgeSec : defaultMaxAgeSec;
+
+        require(block.timestamp - updatedAt <= age, "stale");
+
+        uint256 base = onchain;
+        uint256 diff = onchain > priceHint ? onchain - priceHint : priceHint - onchain;
+        uint256 bps = base == 0 ? type(uint256).max : (diff * 10_000) / base;
+        require(bps <= devBps, "deviation");
+
+        IExecutor(executor).exec_606BaXt{ value: msg.value }(calls);
+    }
+
+    receive() external payable {}
+}
+

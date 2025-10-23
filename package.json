@@ -11,7 +11,8 @@
     "worker:predictive:base:cbbtc_usdc": "pnpm build:config && tsx apps/workers/base_cbbtc_usdc_predictive.ts",
     "predictor:start": "pnpm --filter @morpho-blue-liquidation-bot/predictor start",
     "predictor:calibrate": "pnpm --filter @morpho-blue-liquidation-bot/predictor manual-calibrate",
-    "scheduler:start": "pnpm --filter @morpho-blue-liquidation-bot/oracle-scheduler start"
+    "scheduler:start": "pnpm --filter @morpho-blue-liquidation-bot/oracle-scheduler start",
+    "deploy:guarded": "tsx apps/client/src/deployGuardedLiquidator.ts"
   },
   "lint-staged": {
     "*.ts": [
