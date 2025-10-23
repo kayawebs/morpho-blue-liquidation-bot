@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-interface IExecutor {
-    function exec_606BaXt(bytes[] calldata data) external payable;
-}
-
 interface IAggregatorV3 {
     function latestRoundData()
         external
@@ -28,7 +24,6 @@ interface IERC20 {
 // Gates: deadline, max price deviation (bps) vs Chainlink aggregator, max data age (seconds).
 contract GuardedLiquidator {
     address public owner;
-    address public executor;
     address public aggregator;
     uint16 public defaultMaxDeviationBps; // e.g. 10 = 0.10%
     uint32 public defaultMaxAgeSec;       // e.g. 120 seconds
@@ -52,20 +47,18 @@ contract GuardedLiquidator {
 
     constructor(
         address _owner,
-        address _executor,
         address _aggregator,
         uint16 _maxDevBps,
         uint32 _maxAgeSec
     ) {
-        require(_owner != address(0) && _executor != address(0) && _aggregator != address(0), "zero");
+        require(_owner != address(0) && _aggregator != address(0), "zero");
         owner = _owner;
-        executor = _executor;
         aggregator = _aggregator;
         defaultMaxDeviationBps = _maxDevBps;
         defaultMaxAgeSec = _maxAgeSec;
         aggDecimals = IAggregatorV3(_aggregator).decimals();
         emit OwnerUpdated(_owner);
-        emit ParamsUpdated(_executor, _aggregator, _maxDevBps, _maxAgeSec);
+        emit ParamsUpdated(address(0), _aggregator, _maxDevBps, _maxAgeSec);
     }
 
     function setOwner(address _owner) external onlyOwner {
@@ -80,26 +73,24 @@ contract GuardedLiquidator {
     }
 
     function setParams(
-        address _executor,
         address _aggregator,
         uint16 _maxDevBps,
         uint32 _maxAgeSec
     ) external onlyOwner {
-        if (_executor != address(0)) executor = _executor;
         if (_aggregator != address(0)) {
             aggregator = _aggregator;
             aggDecimals = IAggregatorV3(_aggregator).decimals();
         }
         if (_maxDevBps > 0) defaultMaxDeviationBps = _maxDevBps;
         if (_maxAgeSec > 0) defaultMaxAgeSec = _maxAgeSec;
-        emit ParamsUpdated(executor, aggregator, defaultMaxDeviationBps, defaultMaxAgeSec);
+        emit ParamsUpdated(address(0), aggregator, defaultMaxDeviationBps, defaultMaxAgeSec);
     }
 
     // priceHint must be scaled to aggregator decimals.
     // prevRoundId: require latest round strictly greater than this value (ensures update observed).
     // profitToken: ERC20 whose balance on the executor must increase by >= minProfit (address(0) for ETH).
     function exec(
-        bytes[] calldata calls,
+        Call[] calldata calls,
         uint256 priceHint,
         uint16 maxDevBps,
         uint32 maxAgeSec,
@@ -126,20 +117,46 @@ contract GuardedLiquidator {
         // Pre-balance on executor
         uint256 preBal;
         if (profitToken == address(0)) {
-            preBal = executor.balance;
+            preBal = address(this).balance;
         } else {
-            preBal = IERC20(profitToken).balanceOf(executor);
+            preBal = IERC20(profitToken).balanceOf(address(this));
         }
-        IExecutor(executor).exec_606BaXt{ value: msg.value }(calls);
+        // execute calls atomically; revert on first failure
+        unchecked {
+            for (uint256 i = 0; i < calls.length; i++) {
+                (bool ok, bytes memory ret) = calls[i].target.call{ value: calls[i].value }(calls[i].data);
+                if (!ok) {
+                    // Bubble up the revert
+                    assembly {
+                        revert(add(ret, 0x20), mload(ret))
+                    }
+                }
+            }
+        }
         // Post-balance on executor and profit check
         uint256 postBal;
         if (profitToken == address(0)) {
-            postBal = executor.balance;
+            postBal = address(this).balance;
         } else {
-            postBal = IERC20(profitToken).balanceOf(executor);
+            postBal = IERC20(profitToken).balanceOf(address(this));
         }
         require(postBal >= preBal + minProfit, "profit");
     }
 
+    // Owner sweep functions to collect profits
+    function sweep(address token, address payable to, uint256 amount) external onlyOwner {
+        require(to != address(0), "zero");
+        if (token == address(0)) {
+            (bool ok, ) = to.call{ value: amount }("");
+            require(ok, "eth");
+        } else {
+            require(IERC20(token).balanceOf(address(this)) >= amount, "bal");
+            // minimal ERC20 transfer
+            (bool ok, bytes memory ret) = token.call(abi.encodeWithSignature("transfer(address,uint256)", to, amount));
+            require(ok && (ret.length == 0 || abi.decode(ret, (bool))), "erc20");
+        }
+    }
+
     receive() external payable {}
 }
+    struct Call { address target; uint256 value; bytes data; }

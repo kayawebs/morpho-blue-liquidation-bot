@@ -26,9 +26,6 @@ async function main() {
   if (!rpcUrl) throw new Error(`RPC_URL_${chainId} is missing in .env`);
   if (!priv) throw new Error(`LIQUIDATION_PRIVATE_KEY_${chainId} is missing in .env`);
 
-  const executor = (process.env[`EXECUTOR_ADDRESS_${chainId}`] ?? "") as Address;
-  if (!executor) throw new Error(`EXECUTOR_ADDRESS_${chainId} is missing in .env`);
-
   const defaultAggregator = (process.env[`AGGREGATOR_ADDRESS_${chainId}`] ??
     "0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8") as Address;
   const defaultDevBps = Number(process.env.GUARD_MAX_DEV_BPS ?? 10); // 0.10%
@@ -46,7 +43,6 @@ async function main() {
 
   console.log("Deploying GuardedLiquidator with params:");
   console.log("  owner:", client.account!.address);
-  console.log("  executor:", executor);
   console.log("  aggregator:", defaultAggregator);
   console.log("  maxDevBps:", defaultDevBps);
   console.log("  maxAgeSec:", defaultMaxAgeSec);
@@ -55,7 +51,7 @@ async function main() {
     abi,
     bytecode,
     account: client.account!,
-    args: [client.account!.address, executor, defaultAggregator, defaultDevBps, defaultMaxAgeSec],
+    args: [client.account!.address, defaultAggregator, defaultDevBps, defaultMaxAgeSec],
   });
   const receipt = await waitForTransactionReceipt(client, { hash });
   console.log("GuardedLiquidator deployed at:", receipt.contractAddress);
@@ -65,4 +61,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-
