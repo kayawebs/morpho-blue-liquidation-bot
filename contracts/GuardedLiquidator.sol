@@ -20,6 +20,10 @@ interface IAggregatorV3 {
     function decimals() external view returns (uint8);
 }
 
+interface IERC20 {
+    function balanceOf(address) external view returns (uint256);
+}
+
 // Guarded liquidator wrapper that forwards to an Executor after on-chain gates.
 // Gates: deadline, max price deviation (bps) vs Chainlink aggregator, max data age (seconds).
 contract GuardedLiquidator {
@@ -92,16 +96,22 @@ contract GuardedLiquidator {
     }
 
     // priceHint must be scaled to aggregator decimals.
+    // prevRoundId: require latest round strictly greater than this value (ensures update observed).
+    // profitToken: ERC20 whose balance on the executor must increase by >= minProfit (address(0) for ETH).
     function exec(
         bytes[] calldata calls,
         uint256 priceHint,
         uint16 maxDevBps,
         uint32 maxAgeSec,
+        uint80 prevRoundId,
+        address profitToken,
+        uint256 minProfit,
         uint256 deadline
     ) external payable onlyOperator {
         require(block.timestamp <= deadline, "deadline");
-        (, int256 answer,, uint256 updatedAt,) = IAggregatorV3(aggregator).latestRoundData();
+        (uint80 roundId, int256 answer,, uint256 updatedAt,) = IAggregatorV3(aggregator).latestRoundData();
         require(answer > 0, "bad answer");
+        require(roundId > prevRoundId, "round");
 
         uint256 onchain = uint256(answer);
         uint16 devBps = maxDevBps > 0 ? maxDevBps : defaultMaxDeviationBps;
@@ -113,10 +123,23 @@ contract GuardedLiquidator {
         uint256 diff = onchain > priceHint ? onchain - priceHint : priceHint - onchain;
         uint256 bps = base == 0 ? type(uint256).max : (diff * 10_000) / base;
         require(bps <= devBps, "deviation");
-
+        // Pre-balance on executor
+        uint256 preBal;
+        if (profitToken == address(0)) {
+            preBal = executor.balance;
+        } else {
+            preBal = IERC20(profitToken).balanceOf(executor);
+        }
         IExecutor(executor).exec_606BaXt{ value: msg.value }(calls);
+        // Post-balance on executor and profit check
+        uint256 postBal;
+        if (profitToken == address(0)) {
+            postBal = executor.balance;
+        } else {
+            postBal = IERC20(profitToken).balanceOf(executor);
+        }
+        require(postBal >= preBal + minProfit, "profit");
     }
 
     receive() external payable {}
 }
-
