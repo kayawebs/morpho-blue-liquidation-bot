@@ -151,6 +151,41 @@ This will deploy your own executor contract on every chain you configured, and w
 
 You can also deploy your executor contract through [this interface](https://rubilmax.github.io/executooor/).
 
+## System Overview (project add-ons)
+
+This repository extends the base bot with three services and two worker modes:
+
+- Predictor (`apps/predictor`): collects CEX quotes, aggregates/backs fills, exposes `/predictionAt` and auto-calibrates per-oracle thresholds (offset/heartbeat/lag/weights).
+- Oracle Scheduler (`apps/oracle-scheduler`): watches Chainlink `NewTransmission`, estimates next heartbeat/deviation windows, and pushes WS updates to subscribers.
+- Ponder Indexer (`apps/ponder`): indexes markets/positions and exposes lightweight HTTP APIs for candidate addresses and views.
+- Workers (per market, two strategies):
+  - Confirmed worker: reacts to on-chain confirmed `NewTransmission` events; fetches candidates from Ponder; executes only if profit ≥ $0.1 (USD). Uses the legacy executor path.
+  - Predictive worker: subscribes to Scheduler WS windows and uses Predictor’s `predictionAt` for price; plans multiple attempts within window; intended to use a hard-gated contract for safety.
+
+### Running the two worker modes
+
+- Confirmed (recommended baseline):
+  - Start Ponder: `pnpm ponder:start`
+  - Start worker: `pnpm worker:confirmed:base:cbbtc_usdc`
+  - Multi-executor (optional) via `.env`:
+    - `EXECUTOR_ADDRESSES_8453=0xExecA,0xExecB`
+    - `LIQUIDATION_PRIVATE_KEYS_8453=0xPrivA,0xPrivB`
+  - Notes: fixed confirmations=1; WS RPC for minimal latency; stable log ordering to avoid duplicates.
+
+- Predictive (window-driven skeleton):
+  - Start Predictor: `pnpm predictor:start`
+  - Start Oracle Scheduler: `pnpm scheduler:start`
+  - Start worker: `pnpm worker:predictive:base:cbbtc_usdc`
+  - Notes: uses WS push `ws://localhost:48201/ws/schedule?...`; fetches thresholds/lag from Predictor; plans attempts during windows.
+
+### Hard-gated liquidation (optional)
+
+- Contract: `contracts/GuardedLiquidator.sol` — executes a list of calls directly with on-chain gates:
+  - Deadline, max price deviation vs aggregator, max data age, `roundId` advancement check.
+  - Profit gate: requires post-exec profit (ETH or ERC20) ≥ `minProfit`.
+- Deploy: compile (Foundry/Hardhat), then `pnpm deploy:guarded`.
+- Intended path: predictive worker uses this guard to reduce risk while attempting multiple clears in a short window.
+
 ## Liquidity Venues
 
 A liquidity venue is a way to exchange a token against another token. Within a liquidation, the bot will use liquidity venues in order to get the market's loan token in exchange of the collateral token.
