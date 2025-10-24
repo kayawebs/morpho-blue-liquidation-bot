@@ -12,6 +12,7 @@ import { runBackfillIfNeeded } from './backfill.js';
 import { startOracleWatcher } from './oracleWatcher.js';
 import { startAutoCalibrateScheduler } from './autoCalibrate.js';
 import { seedOracleThresholdsFromConfig } from './seedThresholds.js';
+import { runStartupFit } from './startupFit.js';
 
 async function main() {
   // Fetch proxy is applied per-request inside HttpPollConnector.
@@ -21,6 +22,8 @@ async function main() {
   await runBackfillIfNeeded();
   // Seed feed thresholds from config if provided (deviation/heartbeat pinned by feed owner)
   await seedOracleThresholdsFromConfig();
+  // Startup backtest fitting (slow & gentle): derives lagSeconds and weights (~100ms grid using DB seconds)
+  try { await runStartupFit(); } catch (e) { console.warn('startup fit failed:', e); }
   // Start oracle transmit watcher (polling) to continuously build samples
   await startOracleWatcher();
   const agg = new PriceAggregator(
