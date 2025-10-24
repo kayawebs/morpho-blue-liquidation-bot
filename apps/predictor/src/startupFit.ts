@@ -100,34 +100,28 @@ export async function runStartupFit() {
       const defaultWeights = (cfg.aggregator as any).weights ?? { binance: 1, okx: 1, coinbase: 1 };
       const sources = Object.keys(defaultWeights).map((s) => s.toLowerCase());
       const lagMsList = genLagsMs(3000, 100);
-      const grids = genWeightGrids(sources, 0.1);
-      let best: { lagMs: number; weights: Record<string, number>; p50: number; p90: number; used: number } | undefined;
-      // Evaluate combinations (slow but bounded)
+      let best: { lagMs: number; p50: number; p90: number; used: number } | undefined;
       for (const lagMs of lagMsList) {
-        for (const w of grids) {
-          const errs: number[] = [];
-          let used = 0;
-          for (const s of samples) {
-            const tMs = s.ts * 1000 - lagMs;
-            // use 100ms aggregated combined price (already aggregated across sources)
-            const pred = await priceAt100ms(symbol, tMs);
-            if (!(pred > 0)) continue;
-            const ratio = s.onchain / (pred as number);
-            if (!Number.isFinite(ratio)) continue;
-            const ebps = Math.round((ratio - 1) * 10_000);
-            errs.push(Math.abs(ebps));
-            used++;
-            // light pacing on DB pressure
-            if (used % 10 === 0) await sleep(5);
-          }
-          if (errs.length < Math.max(10, Math.floor(samples.length * 0.4))) continue;
-          const q = percentiles(errs, [0.5, 0.9]);
-          const cand = { lagMs, weights: w, p50: q[0.5]!, p90: q[0.9]!, used };
-          if (!best || cand.p90 < best.p90 || (cand.p90 === best.p90 && cand.p50 < best.p50)) best = cand;
+        const errs: number[] = [];
+        let used = 0;
+        for (const s of samples) {
+          const tMs = s.ts * 1000 - lagMs;
+          const pred = await priceAt100ms(symbol, tMs);
+          if (!(pred > 0)) continue;
+          const ratio = s.onchain / (pred as number);
+          if (!Number.isFinite(ratio)) continue;
+          const ebps = Math.round((ratio - 1) * 10_000);
+          errs.push(Math.abs(ebps));
+          used++;
+          if (used % 10 === 0) await sleep(5);
         }
+        if (errs.length < Math.max(10, Math.floor(samples.length * 0.4)))) continue;
+        const q = percentiles(errs, [0.5, 0.9]);
+        const cand = { lagMs, p50: q[0.5]!, p90: q[0.9]!, used };
+        if (!best || cand.p90 < best.p90 || (cand.p90 === best.p90 && cand.p50 < best.p50)) best = cand;
       }
       if (!best) continue;
-      // Persist: lag_seconds and weights
+      // Persist: lag_seconds and default weights (normalized)
       const lagSeconds = Math.round(best.lagMs / 1000);
       await pool.query(
         `UPDATE oracle_pred_config SET lag_seconds=$3, updated_at=now()
@@ -136,15 +130,16 @@ export async function runStartupFit() {
       );
       // Clear previous weights, then insert
       await pool.query('DELETE FROM oracle_cex_weights WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)', [chainId, addr]);
-      for (const [src, wt] of Object.entries(best.weights)) {
+      const norm = sources.length > 0 ? 1 / sources.length : 0;
+      for (const src of sources) {
         await pool.query(
           `INSERT INTO oracle_cex_weights(chain_id, oracle_addr, source, weight)
            VALUES($1,$2,$3,$4)
            ON CONFLICT (chain_id, oracle_addr, source) DO UPDATE SET weight=EXCLUDED.weight, updated_at=now()`,
-          [chainId, addr, src, wt],
+          [chainId, addr, src, norm],
         );
       }
-      console.log(`🧮 Startup fit for ${addr} on ${chainId}: lagMs=${best.lagMs}, p90=${best.p90}bps, weights=${JSON.stringify(best.weights)}, used=${best.used}/${samples.length}`);
+      console.log(`🧮 Startup fit for ${addr} on ${chainId}: lagMs=${best.lagMs}, p90=${best.p90}bps, used=${best.used}/${samples.length}`);
       // gentle pause between oracles
       await sleep(200);
     } catch (e) {
