@@ -52,6 +52,15 @@ export async function initSchema() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (chain_id, oracle_addr, source)
     );
+
+    -- Sub-second aggregated prices (100ms bins)
+    CREATE TABLE IF NOT EXISTS cex_agg_100ms (
+      symbol TEXT NOT NULL,
+      ts_ms BIGINT NOT NULL,
+      price DOUBLE PRECISION NOT NULL,
+      PRIMARY KEY (symbol, ts_ms)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cex_agg_100ms_symbol_ts ON cex_agg_100ms(symbol, ts_ms DESC);
   `);
 }
 
@@ -91,4 +100,44 @@ setInterval(async () => {
 
 export async function insertTick(source: string, symbol: string, ts: number, price: number) {
   batch.push({ source, symbol, ts, price });
+}
+
+// 100ms aggregated write buffer
+const agg100Batch: { symbol: string; tsMs: number; price: number }[] = [];
+let aggFlushing = false;
+setInterval(async () => {
+  if (aggFlushing || agg100Batch.length === 0) return;
+  aggFlushing = true;
+  const items = agg100Batch.splice(0, agg100Batch.length);
+  const values: string[] = [];
+  const params: any[] = [];
+  let i = 1;
+  for (const it of items) {
+    values.push(`($${i++}, $${i++}, $${i++})`);
+    params.push(it.symbol, Math.floor(it.tsMs), it.price);
+  }
+  try {
+    await pool.query(
+      `INSERT INTO cex_agg_100ms(symbol, ts_ms, price) VALUES ${values.join(',')}
+       ON CONFLICT (symbol, ts_ms) DO UPDATE SET price=EXCLUDED.price`,
+      params,
+    );
+  } catch (e) {
+    // fallback row-by-row
+    for (const it of items) {
+      try {
+        await pool.query(
+          `INSERT INTO cex_agg_100ms(symbol, ts_ms, price) VALUES ($1,$2,$3)
+           ON CONFLICT (symbol, ts_ms) DO UPDATE SET price=EXCLUDED.price`,
+          [it.symbol, Math.floor(it.tsMs), it.price],
+        );
+      } catch {}
+    }
+  } finally {
+    aggFlushing = false;
+  }
+}, 1000);
+
+export function insertAgg100ms(symbol: string, tsMs: number, price: number) {
+  agg100Batch.push({ symbol, tsMs, price });
 }

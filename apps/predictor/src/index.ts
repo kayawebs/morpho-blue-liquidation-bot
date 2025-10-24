@@ -1,5 +1,5 @@
 import './env.js';
-import { initSchema, insertTick } from './db.js';
+import { initSchema, insertTick, insertAgg100ms } from './db.js';
 // No global fetch proxy injection here to avoid undici Response mismatch issues.
 import { PriceAggregator } from './aggregator.js';
 import { MultiCexConnector } from './connectors/ccxws.js';
@@ -48,6 +48,22 @@ async function main() {
     console.log('🔇 WS disabled by config; using HTTP polling only');
   }
   await httpConnector.start();
+  // Sub-second aggregated writer (100ms bins)
+  const symbols = (cfg.pairs ?? []).map((p) => p.symbol);
+  const lastBin: Record<string, number> = {};
+  const binMs = Number((cfg.aggregator as any).binMs ?? 100);
+  setInterval(() => {
+    const now = Date.now();
+    const b = now - (now % binMs);
+    for (const s of symbols) {
+      if (lastBin[s] === b) continue;
+      const ag = agg.aggregated(s);
+      if (typeof ag.price === 'number' && Number.isFinite(ag.price)) {
+        insertAgg100ms(s, b, ag.price);
+        lastBin[s] = b;
+      }
+    }
+  }, Number.isFinite((cfg.aggregator as any).binMs) ? Number((cfg.aggregator as any).binMs) : 100);
   const app = buildApp({ agg });
   const port = Number(cfg.service.port ?? 48080);
   serve({ fetch: app.fetch, port });
