@@ -76,6 +76,17 @@ export function buildApp(deps: PredictorDeps) {
     return c.json(rows);
   });
 
+  // Expose per-oracle CEX weights
+  app.get('/oracles/:chainId/:addr/weights', async (c) => {
+    const chainId = Number(c.req.param('chainId'));
+    const addr = c.req.param('addr');
+    const { rows } = await pool.query(
+      `SELECT source, weight FROM oracle_cex_weights WHERE chain_id=$1 AND lower(oracle_addr)=lower($2) ORDER BY source`,
+      [chainId, addr],
+    );
+    return c.json(rows);
+  });
+
   app.get('/oracles/:chainId/:addr/prediction', async (c) => {
     const chainId = Number(c.req.param('chainId'));
     const addr = c.req.param('addr');
