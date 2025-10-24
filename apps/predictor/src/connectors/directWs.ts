@@ -71,7 +71,8 @@ export class DirectWsConnector {
   }
 
   private startBinance(normSymbol: string, exSymbol: string) {
-    const url = `wss://stream.binance.com:9443/ws/${exSymbol.toLowerCase()}@trade`;
+    // Prefer best bid/ask mid via bookTicker
+    const url = `wss://stream.binance.com:9443/ws/${exSymbol.toLowerCase()}@bookTicker`;
     this.connectWithRetry(
       'binance',
       url,
@@ -79,9 +80,13 @@ export class DirectWsConnector {
       (buf) => {
         try {
           const msg = JSON.parse(buf.toString());
-          const price = Number(msg?.p);
-          const ts = Number(msg?.E ?? Date.now());
-          if (Number.isFinite(price)) this.onTick({ ts, price, source: 'binance', symbol: normSymbol });
+          const bid = Number(msg?.b);
+          const ask = Number(msg?.a);
+          const ts = Date.now();
+          if (Number.isFinite(bid) && Number.isFinite(ask)) {
+            const mid = (bid + ask) / 2;
+            this.onTick({ ts, price: mid, source: 'binance', symbol: normSymbol });
+          }
         } catch {}
       },
       (ws) => { try { ws.ping(); } catch {} },
@@ -94,16 +99,24 @@ export class DirectWsConnector {
       'okx',
       url,
       (ws) => {
-        const sub = { op: 'subscribe', args: [{ channel: 'trades', instId: exSymbol }] };
+        // Subscribe to tickers (has bidPx/askPx)
+        const sub = { op: 'subscribe', args: [{ channel: 'tickers', instId: exSymbol }] };
         ws.send(JSON.stringify(sub));
       },
       (buf) => {
         try {
           const msg = JSON.parse(buf.toString());
           const d = Array.isArray(msg?.data) && msg.data[0];
-          const price = Number(d?.px ?? d?.p ?? d?.last ?? d?.price);
+          const bid = Number(d?.bidPx);
+          const ask = Number(d?.askPx);
           const ts = Number(d?.ts ?? Date.now());
-          if (Number.isFinite(price)) this.onTick({ ts, price, source: 'okx', symbol: normSymbol });
+          if (Number.isFinite(bid) && Number.isFinite(ask)) {
+            const mid = (bid + ask) / 2;
+            this.onTick({ ts, price: mid, source: 'okx', symbol: normSymbol });
+          } else {
+            const last = Number(d?.last);
+            if (Number.isFinite(last)) this.onTick({ ts, price: last, source: 'okx', symbol: normSymbol });
+          }
         } catch {}
       },
       (ws) => { try { ws.send('ping'); } catch {} },
@@ -123,9 +136,16 @@ export class DirectWsConnector {
         try {
           const msg = JSON.parse(buf.toString());
           if (msg?.type !== 'ticker') return;
-          const price = Number(msg?.price ?? msg?.last_trade_price ?? msg?.best_ask);
           const ts = msg?.time ? Date.parse(msg.time) : Date.now();
-          if (Number.isFinite(price)) this.onTick({ ts, price, source: 'coinbase', symbol: normSymbol });
+          const bestBid = Number(msg?.best_bid);
+          const bestAsk = Number(msg?.best_ask);
+          if (Number.isFinite(bestBid) && Number.isFinite(bestAsk)) {
+            const mid = (bestBid + bestAsk) / 2;
+            this.onTick({ ts, price: mid, source: 'coinbase', symbol: normSymbol });
+          } else {
+            const last = Number(msg?.price ?? msg?.last_trade_price ?? msg?.best_ask);
+            if (Number.isFinite(last)) this.onTick({ ts, price: last, source: 'coinbase', symbol: normSymbol });
+          }
         } catch {}
       },
       (ws) => { try { ws.ping(); } catch {} },
