@@ -7,14 +7,18 @@ type Sample = { ts: number; block: bigint; tx: string; onchain: number };
 
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 
-async function medianAt(symbol: string, tsSec: number, source?: string): Promise<number | undefined> {
-  const q = source
-    ? `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::float AS p FROM cex_ticks WHERE symbol=$1 AND source=$2 AND ts BETWEEN to_timestamp($3-2) AND to_timestamp($3+2)`
-    : `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::float AS p FROM cex_ticks WHERE symbol=$1 AND ts BETWEEN to_timestamp($2-2) AND to_timestamp($2+2)`;
-  const params = source ? [symbol, source, tsSec] : [symbol, tsSec];
-  const { rows } = await pool.query(q, params as any);
-  const p = Number(rows[0]?.p);
-  return Number.isFinite(p) ? p : undefined;
+async function priceAt100ms(symbol: string, tsMs: number): Promise<number | undefined> {
+  const { rows } = await pool.query(
+    `SELECT price FROM cex_agg_100ms WHERE symbol=$1 AND ts_ms <= $2 ORDER BY ts_ms DESC LIMIT 1`,
+    [symbol, Math.floor(tsMs)],
+  );
+  if (rows.length > 0) return Number(rows[0].price);
+  const { rows: rows2 } = await pool.query(
+    `SELECT price FROM cex_agg_100ms WHERE symbol=$1 AND ts_ms BETWEEN $2 AND $3 ORDER BY ABS(ts_ms - $2) ASC LIMIT 1`,
+    [symbol, Math.floor(tsMs), Math.floor(tsMs + 300)],
+  );
+  if (rows2.length > 0) return Number(rows2[0].price);
+  return undefined;
 }
 
 function percentiles(nums: number[], qs: number[]) {
@@ -104,17 +108,11 @@ export async function runStartupFit() {
           const errs: number[] = [];
           let used = 0;
           for (const s of samples) {
-            const t = s.ts - Math.floor(lagMs / 1000); // DB is per-second; coarse align
-            // compute weighted price at t using per-source medians
-            let num = 0; let den = 0; let haveAny = false;
-            for (const ex of sources) {
-              const p = await medianAt(symbol, t, ex);
-              if (p !== undefined && (w[ex] ?? 0) > 0) { num += p * (w[ex] ?? 0); den += (w[ex] ?? 0); haveAny = true; }
-            }
-            if (!haveAny || den === 0) continue;
-            const pred = num / den;
+            const tMs = s.ts * 1000 - lagMs;
+            // use 100ms aggregated combined price (already aggregated across sources)
+            const pred = await priceAt100ms(symbol, tMs);
             if (!(pred > 0)) continue;
-            const ratio = s.onchain / pred;
+            const ratio = s.onchain / (pred as number);
             if (!Number.isFinite(ratio)) continue;
             const ebps = Math.round((ratio - 1) * 10_000);
             errs.push(Math.abs(ebps));
@@ -154,4 +152,3 @@ export async function runStartupFit() {
     }
   }
 }
-

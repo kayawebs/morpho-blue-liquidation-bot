@@ -15,6 +15,21 @@ export function buildApp(deps: PredictorDeps) {
   const app = new Hono();
   const appCfg = loadConfig();
 
+  async function priceAt100ms(symbol: string, tsMs: number): Promise<number | undefined> {
+    // nearest not after tsMs (left-join), fallback to nearest overall within 300ms
+    const { rows } = await pool.query(
+      `SELECT price, ts_ms FROM cex_agg_100ms WHERE symbol=$1 AND ts_ms <= $2 ORDER BY ts_ms DESC LIMIT 1`,
+      [symbol, Math.floor(tsMs)],
+    );
+    if (rows.length > 0) return Number(rows[0].price);
+    const { rows: rows2 } = await pool.query(
+      `SELECT price, ts_ms FROM cex_agg_100ms WHERE symbol=$1 AND ts_ms BETWEEN $2 AND $3 ORDER BY ABS(ts_ms - $2) ASC LIMIT 1`,
+      [symbol, Math.floor(tsMs), Math.floor(tsMs + 300)],
+    );
+    if (rows2.length > 0) return Number(rows2[0].price);
+    return undefined;
+  }
+
   app.get('/health', (c) => c.text('ok'));
 
   app.get('/stats/:symbol', (c) => {
@@ -124,14 +139,18 @@ export function buildApp(deps: PredictorDeps) {
     });
   });
 
-  // Compute weighted CEX price at a given timestamp (seconds) using DB medians in ±2s window.
+  // Compute weighted CEX price at a given timestamp.
   app.get('/priceAt/:symbol', async (c) => {
     try {
       const symbol = c.req.param('symbol');
-      const ts = Number(c.req.query('ts'));
-      if (!Number.isFinite(ts)) return c.json({ error: 'ts (seconds) required' }, 400);
+      const tsQ = c.req.query('ts');
+      const tsMsQ = c.req.query('tsMs');
+      const hasMs = tsMsQ !== undefined;
+      const ts = hasMs ? Number(tsMsQ) : Number(tsQ);
+      if (!Number.isFinite(ts)) return c.json({ error: hasMs ? 'tsMs (milliseconds) required' : 'ts (seconds) required' }, 400);
       const lag = Number(c.req.query('lag') ?? 0);
-      const at = ts - (Number.isFinite(lag) ? lag : 0);
+      const lagMs = Number(c.req.query('lagMs') ?? 0);
+      const at = hasMs ? (ts - (Number.isFinite(lagMs) ? lagMs : 0)) : (ts - (Number.isFinite(lag) ? lag : 0));
       const sourcesQ = (c.req.query('sources') ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
       const weightsQ = c.req.query('weights'); // format: ex:w,ex2:w2
       const defaultSources = Object.keys((appCfg.aggregator as any).weights ?? { binance: 1, okx: 1, coinbase: 1 });
@@ -147,43 +166,49 @@ export function buildApp(deps: PredictorDeps) {
         Object.assign(weights, (appCfg.aggregator as any).weights ?? {});
         if (Object.keys(weights).length === 0) for (const s of sources) weights[s] = 1 / sources.length;
       }
-      // per-exchange medians
-      const per: Record<string, number | null> = {};
-      for (const s of sources) {
-        const { rows } = await pool.query(
-          `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::float AS p
-           FROM cex_ticks WHERE symbol=$1 AND source=$2 AND ts BETWEEN to_timestamp($3-2) AND to_timestamp($3+2)`,
-          [symbol, s, at],
-        );
-        const p = Number(rows[0]?.p);
-        per[s] = Number.isFinite(p) ? p : null;
-      }
-      // weighted sum over available
-      let num = 0;
-      let den = 0;
-      for (const s of sources) {
-        const p = per[s];
-        const w = Number(weights[s] ?? 0);
-        if (p !== null && Number.isFinite(w) && w > 0) {
-          num += p * w;
-          den += w;
+      // If milliseconds path, use 100ms aggregated price directly; otherwise keep legacy per-exchange median approach
+      if (hasMs) {
+        const p = await priceAt100ms(symbol, Math.floor(at));
+        return c.json({ symbol, tsMs: ts, lagMs: Number.isFinite(lagMs) ? lagMs : 0, atMs: at, price: p });
+      } else {
+        // per-exchange medians (seconds)
+        const per: Record<string, number | null> = {};
+        for (const s of sources) {
+          const { rows } = await pool.query(
+            `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::float AS p
+             FROM cex_ticks WHERE symbol=$1 AND source=$2 AND ts BETWEEN to_timestamp($3-2) AND to_timestamp($3+2)`,
+            [symbol, s, at],
+          );
+          const p = Number(rows[0]?.p);
+          per[s] = Number.isFinite(p) ? p : null;
         }
+        // weighted sum over available
+        let num = 0; let den = 0;
+        for (const s of sources) {
+          const p = per[s];
+          const w = Number(weights[s] ?? 0);
+          if (p !== null && Number.isFinite(w) && w > 0) { num += p * w; den += w; }
+        }
+        const weighted = den > 0 ? num / den : null;
+        return c.json({ symbol, ts, lag: Number.isFinite(lag) ? lag : 0, at, sources, weights, per, weighted });
       }
-      const weighted = den > 0 ? num / den : null;
-      return c.json({ symbol, ts, lag: Number.isFinite(lag) ? lag : 0, at, sources, weights, per, weighted });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
     }
   });
 
-  // Adapter-based predicted price at timestamp (seconds) with optional lag.
+  // Adapter-based predicted price at timestamp with optional lag (supports seconds or milliseconds).
   app.get('/oracles/:chainId/:addr/predictionAt', async (c) => {
     const chainId = Number(c.req.param('chainId'));
     const addr = c.req.param('addr');
-    const ts = Number(c.req.query('ts'));
-    if (!Number.isFinite(ts)) return c.json({ error: 'ts (seconds) required' }, 400);
+    const tsQ = c.req.query('ts');
+    const tsMsQ = c.req.query('tsMs');
+    const hasMs = tsMsQ !== undefined;
+    const ts = hasMs ? Number(tsMsQ) : Number(tsQ);
+    if (!Number.isFinite(ts)) return c.json({ error: hasMs ? 'tsMs (milliseconds) required' : 'ts (seconds) required' }, 400);
     const lag = Number(c.req.query('lag') ?? 0);
-    const at = ts - (Number.isFinite(lag) ? lag : 0);
+    const lagMs = Number(c.req.query('lagMs') ?? 0);
+    const at = hasMs ? (ts - (Number.isFinite(lagMs) ? lagMs : 0)) : (ts - (Number.isFinite(lag) ? lag : 0));
     const rowRes = await pool.query(
       'SELECT heartbeat_seconds, offset_bps, decimals, scale_factor FROM oracle_pred_config WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)',
       [chainId, addr],
@@ -193,19 +218,27 @@ export function buildApp(deps: PredictorDeps) {
     const adapter = buildAdapter(chainId, addr);
     const required = adapter.requiredSymbols();
     const aggMap: Record<string, number | undefined> = {};
-    for (const s of required) {
-      const { rows } = await pool.query(
-        `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::float AS p
-         FROM cex_ticks WHERE symbol=$1 AND ts BETWEEN to_timestamp($2-2) AND to_timestamp($2+2)`,
-        [s, at],
-      );
-      const p = Number(rows[0]?.p);
-      if (!Number.isFinite(p)) return c.json({ error: `no price for ${s} at ts=${at}` }, 503);
-      aggMap[s] = p;
+    if (hasMs) {
+      for (const s of required) {
+        const p = await priceAt100ms(s, Math.floor(at));
+        if (!Number.isFinite(p!)) return c.json({ error: `no 100ms price for ${s} at ms=${at}` }, 503);
+        aggMap[s] = p as number;
+      }
+    } else {
+      for (const s of required) {
+        const { rows } = await pool.query(
+          `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::float AS p
+           FROM cex_ticks WHERE symbol=$1 AND ts BETWEEN to_timestamp($2-2) AND to_timestamp($2+2)`,
+          [s, at],
+        );
+        const p = Number(rows[0]?.p);
+        if (!Number.isFinite(p)) return c.json({ error: `no price for ${s} at ts=${at}` }, 503);
+        aggMap[s] = p;
+      }
     }
     const scale = BigInt(row.scale_factor);
     const { answer, price1e36 } = adapter.compute({ agg: aggMap, decimals: Number(row.decimals), scaleFactor: scale });
-    return c.json({ chainId, oracle: addr, ts, lag: Number.isFinite(lag) ? lag : 0, at, required, aggMap, answer, price1e36: price1e36?.toString() });
+    return c.json({ chainId, oracle: addr, ts: hasMs ? undefined : ts, tsMs: hasMs ? ts : undefined, lag: hasMs ? undefined : (Number.isFinite(lag) ? lag : 0), lagMs: hasMs ? (Number.isFinite(lagMs) ? lagMs : 0) : undefined, at: hasMs ? undefined : at, atMs: hasMs ? at : undefined, required, aggMap, answer, price1e36: price1e36?.toString() });
   });
 
   return app;
