@@ -186,12 +186,30 @@ async function main() {
   }
 
   async function getMarketView() {
-    return (await readContract(publicClient as any, {
+    const res: any = await readContract(publicClient as any, {
       address: MARKET.morphoAddress,
       abi: morphoBlueAbi,
       functionName: "market",
       args: [MARKET.marketId],
-    })) as {
+    });
+    if (Array.isArray(res)) {
+      return {
+        totalSupplyAssets: res[0] as bigint,
+        totalSupplyShares: res[1] as bigint,
+        totalBorrowAssets: res[2] as bigint,
+        totalBorrowShares: res[3] as bigint,
+        lastUpdate: res[4] as bigint,
+        fee: res[5] as bigint,
+      } as {
+        totalSupplyAssets: bigint;
+        totalSupplyShares: bigint;
+        totalBorrowAssets: bigint;
+        totalBorrowShares: bigint;
+        lastUpdate: bigint;
+        fee: bigint;
+      };
+    }
+    return res as {
       totalSupplyAssets: bigint;
       totalSupplyShares: bigint;
       totalBorrowAssets: bigint;
