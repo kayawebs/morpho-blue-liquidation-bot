@@ -270,7 +270,17 @@ async function main() {
   publicClient.watchBlocks({
     emitMissed: true,
     includeTransactions: false,
-    onBlock: (blk: any) => { head = blk.number as bigint; void processMatured(); },
+    onBlock: async (blk: any) => {
+      try {
+        if (!blk || typeof blk.number === 'undefined') {
+          const n = await publicClient.getBlockNumber();
+          head = n;
+        } else {
+          head = blk.number as bigint;
+        }
+        await processMatured();
+      } catch {}
+    },
     onError: () => {},
   });
 
