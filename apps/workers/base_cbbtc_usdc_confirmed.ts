@@ -292,10 +292,13 @@ async function main() {
         abi: AGGREGATOR_V2V3_ABI,
         functionName: 'latestRoundData',
       });
-      const { adapter, decimals, scaleFactor } = getAdapter(MARKET.chainId, MARKET.aggregator);
-      const onchainAnswer = Number(round[1]) / 10 ** decimals;
-      const scaled = BigInt(Math.round(onchainAnswer * 10 ** decimals));
-      const price1e36 = scaleFactor * scaled;
+      const { decimals, scaleFactor } = getAdapter(MARKET.chainId, MARKET.aggregator);
+      const answerRaw = round?.[1] as bigint | undefined; // int256 scaled by 10^decimals
+      if (typeof answerRaw !== 'bigint') {
+        console.warn('⚠️ latestRoundData returned invalid answer');
+        return;
+      }
+      const price1e36 = scaleFactor * answerRaw;
 
       // 构造市场视图进行精确清算评估
       const [params, view] = await Promise.all([getMarketParams(), getMarketView()]);
