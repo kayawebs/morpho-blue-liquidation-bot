@@ -288,8 +288,11 @@ async function main() {
   });
 
   async function handleConfirmedTransmission(item?: QItem) {
+    let phase = 'init';
+    let paramsDump: any = undefined;
     try {
       // 读取最新 on-chain 答案
+      phase = 'readLatestRoundData';
       const round: any = await (publicClient as any).readContract({
         address: MARKET.aggregator,
         abi: AGGREGATOR_V2V3_ABI,
@@ -311,14 +314,37 @@ async function main() {
         });
         return;
       }
+      phase = 'computePrice';
       const price1e36 = scaleFactor * answerRaw;
 
       // 构造市场视图进行精确清算评估
+      phase = 'fetchMarketState';
       const [params, view] = await Promise.all([getMarketParams(), getMarketView()]);
+      if (!params || !view) {
+        throw new Error('market state not available');
+      }
+      phase = 'buildMarketObj';
+      // 兼容 viem 返回的 tuple 结果，显式映射到具名字段，避免 lltv 丢失
+      const mp = Array.isArray(params)
+        ? {
+            loanToken: (params as any)[0],
+            collateralToken: (params as any)[1],
+            oracle: (params as any)[2],
+            irm: (params as any)[3],
+            lltv: (params as any)[4],
+          }
+        : (params as any);
+      paramsDump = {
+        loanToken: (mp as any)?.loanToken,
+        collateralToken: (mp as any)?.collateralToken,
+        oracle: (mp as any)?.oracle,
+        irm: (mp as any)?.irm,
+        lltv: (mp as any)?.lltv?.toString?.() ?? String((mp as any)?.lltv),
+      };
       const marketObj = new (await import("@morpho-org/blue-sdk")).Market({
         chainId: MARKET.chainId,
         id: MARKET.marketId as any,
-        params: new (await import("@morpho-org/blue-sdk")).MarketParams(params as any),
+        params: new (await import("@morpho-org/blue-sdk")).MarketParams(mp as any),
         price: price1e36 as any,
         totalSupplyAssets: view.totalSupplyAssets,
         totalSupplyShares: view.totalSupplyShares,
@@ -328,9 +354,11 @@ async function main() {
         fee: view.fee,
       }).accrueInterest(Math.floor(Date.now() / 1000).toString());
 
+      phase = 'pickBatch';
       const batch = pickBatch();
       // 预筛选出可清算仓位（并按可扣押资产从大到小排序），上限=执行器数量
       const viable: { user: Address; iposition: any; seizable: bigint }[] = [];
+      phase = 'scanCandidates';
       for (const user of batch) {
         try {
           const p = await getUserPosition(user);
@@ -351,6 +379,7 @@ async function main() {
       }
       viable.sort((a, b) => (a.seizable === b.seizable ? 0 : a.seizable > b.seizable ? -1 : 1));
       const selected = viable.slice(0, liquidators.length);
+      phase = 'executeLiquidations';
       const results = await Promise.all(
         selected.map((v, i) =>
           liquidators[i]!.liquidateSingle(
@@ -368,6 +397,8 @@ async function main() {
         aggregator: MARKET.aggregator,
         head: head?.toString?.(),
         item: item ? { blockNumber: item.blockNumber?.toString?.(), txIndex: item.txIndex, logIndex: item.logIndex, txHash: item.txHash } : undefined,
+        phase,
+        params: paramsDump,
       };
       // 深度解析该 tx 的事件，帮助定位解码/精度问题
       try {

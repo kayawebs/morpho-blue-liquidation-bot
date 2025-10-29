@@ -124,11 +124,15 @@ export class LiquidationBot {
 
     encoder.erc20Approve(marketParams.loanToken, this.morphoAddress, maxUint256);
 
+    const lltvBn =
+      typeof (marketParams as any).lltv === 'bigint'
+        ? ((marketParams as any).lltv as bigint)
+        : BigInt((marketParams as any).lltv);
     encoder.morphoBlueLiquidate(
       this.morphoAddress,
       {
         ...marketParams,
-        lltv: BigInt(marketParams.lltv),
+        lltv: lltvBn,
       },
       position.user,
       position.seizableCollateral,
