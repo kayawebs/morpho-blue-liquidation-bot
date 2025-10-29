@@ -7,6 +7,7 @@ import {
   webSocket,
   type Address,
   getAbiItem,
+  decodeEventLog,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { readContract } from "viem/actions";
@@ -210,7 +211,7 @@ async function main() {
   }
 
   // 事件确认与处理队列
-  type QItem = { blockNumber: bigint; txIndex: number; logIndex: number };
+  type QItem = { blockNumber: bigint; txIndex: number; logIndex: number; txHash?: string; blockHash?: string };
   const queue: QItem[] = [];
   const seen = new Set<string>();
   const CONFIRMATIONS = 1; // 固定为1，不提供配置
@@ -232,6 +233,8 @@ async function main() {
           blockNumber: l.blockNumber as bigint,
           txIndex: Number(l.transactionIndex ?? 0),
           logIndex: Number(l.logIndex ?? 0),
+          txHash: l.transactionHash as string | undefined,
+          blockHash: l.blockHash as string | undefined,
         });
         eventsReceived++;
       }
@@ -262,8 +265,8 @@ async function main() {
           : a.txIndex - b.txIndex
         : Number(a.blockNumber - b.blockNumber),
     );
-    for (const _ of matured) {
-      await handleConfirmedTransmission();
+    for (const it of matured) {
+      await handleConfirmedTransmission(it);
       eventsProcessed++;
     }
   }
@@ -284,7 +287,7 @@ async function main() {
     onError: () => {},
   });
 
-  async function handleConfirmedTransmission() {
+  async function handleConfirmedTransmission(item?: QItem) {
     try {
       // 读取最新 on-chain 答案
       const round: any = await (publicClient as any).readContract({
@@ -295,7 +298,10 @@ async function main() {
       const { decimals, scaleFactor } = getAdapter(MARKET.chainId, MARKET.aggregator);
       const answerRaw = round?.[1] as bigint | undefined; // int256 scaled by 10^decimals
       if (typeof answerRaw !== 'bigint') {
-        console.warn('⚠️ latestRoundData returned invalid answer');
+        console.warn('⚠️ latestRoundData returned invalid answer', {
+          aggregator: MARKET.aggregator,
+          roundRaw: Array.isArray(round) ? round.map((x: any) => (typeof x === 'bigint' ? x.toString() : x)) : round,
+        });
         return;
       }
       const price1e36 = scaleFactor * answerRaw;
@@ -350,7 +356,39 @@ async function main() {
       const successes = results.filter(Boolean).length;
       if (attempts > 0) console.log(`🔔 [Confirmed] transmit触发：attempts=${attempts}, successes=${successes}`);
     } catch (e) {
-      console.warn("⚠️ handleConfirmedTransmission error:", (e as any)?.message ?? e);
+      const errMsg = (e as any)?.message ?? String(e);
+      const context: Record<string, any> = {
+        aggregator: MARKET.aggregator,
+        head: head?.toString?.(),
+        item: item ? { blockNumber: item.blockNumber?.toString?.(), txIndex: item.txIndex, logIndex: item.logIndex, txHash: item.txHash } : undefined,
+      };
+      // 深度解析该 tx 的事件，帮助定位解码/精度问题
+      try {
+        if (item?.txHash) {
+          const receipt = await (publicClient as any).getTransactionReceipt({ hash: item.txHash as `0x${string}` });
+          const log = receipt?.logs?.find((l: any) => String(l.address).toLowerCase() === String(MARKET.aggregator).toLowerCase());
+          if (log) {
+            const OCR2_EVENT = getAbiItem({
+              abi: [{ type: 'event', name: 'NewTransmission', inputs: [
+                { indexed: true, name: 'aggregatorRoundId', type: 'uint32' },
+                { indexed: false, name: 'answer', type: 'int192' },
+                { indexed: false, name: 'transmitter', type: 'address' },
+                { indexed: false, name: 'observations', type: 'int192[]' },
+                { indexed: false, name: 'observers', type: 'bytes' },
+                { indexed: false, name: 'rawReportContext', type: 'bytes32' },
+              ]}], name: 'NewTransmission',
+            }) as any;
+            const dec = decodeEventLog({ abi: [OCR2_EVENT], data: log.data, topics: log.topics as any });
+            const args: any = dec?.args ?? {};
+            context.decoded = {
+              aggregatorRoundId: (args?.aggregatorRoundId as any)?.toString?.() ?? String(args?.aggregatorRoundId),
+              answerRaw: (args?.answer as any)?.toString?.(),
+              transmitter: args?.transmitter,
+            };
+          }
+        }
+      } catch {}
+      console.warn("⚠️ handleConfirmedTransmission error:", errMsg, context);
     }
   }
 
