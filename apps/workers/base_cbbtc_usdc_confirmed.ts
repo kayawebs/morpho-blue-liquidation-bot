@@ -237,6 +237,8 @@ async function main() {
   let eventsReceived = 0;
   let eventsProcessed = 0;
 
+  const VERBOSE = process.env.WORKER_VERBOSE === '1';
+
   // 订阅 OCR2 NewTransmission（确认后处理）
   const evt = getAbiItem({ abi: OCR2_NEW_TRANSMISSION as any, name: "NewTransmission" }) as any;
   publicClient.watchEvent({
@@ -255,6 +257,7 @@ async function main() {
           blockHash: l.blockHash as string | undefined,
         });
         eventsReceived++;
+        if (VERBOSE) console.log(`🛰 onLogs queued key=${key} queue=${queue.length}`);
       }
       // 稳定排序：按区块/交易/日志索引
       queue.sort((a, b) =>
@@ -275,6 +278,7 @@ async function main() {
       if (head === 0n || head - it.blockNumber < BigInt(CONFIRMATIONS)) break;
       matured.push(it); queue.shift();
     }
+    if (VERBOSE && matured.length > 0) console.log(`🧮 matured=${matured.length} head=${head.toString()}`);
     // 同区块内按 txIndex/logIndex 顺序处理
     matured.sort((a, b) =>
       a.blockNumber === b.blockNumber
@@ -304,6 +308,31 @@ async function main() {
     },
     onError: () => {},
   });
+
+  // 后备扫描：定期扫描近 N 个区块防止订阅丢事件
+  async function scanRecentTransmissions() {
+    try {
+      const cur = await publicClient.getBlockNumber();
+      const from = cur > 200n ? cur - 200n : 0n;
+      const logs = await publicClient.getLogs({ address: MARKET.aggregator, event: evt, fromBlock: from, toBlock: cur } as any);
+      for (const l of logs as any[]) {
+        const key = `${l.blockNumber}:${l.transactionIndex}:${l.logIndex}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        queue.push({
+          blockNumber: l.blockNumber as bigint,
+          txIndex: Number(l.transactionIndex ?? 0),
+          logIndex: Number(l.logIndex ?? 0),
+          txHash: l.transactionHash as string | undefined,
+          blockHash: l.blockHash as string | undefined,
+        });
+        eventsReceived++;
+        if (VERBOSE) console.log(`🔎 backfill queued key=${key} queue=${queue.length}`);
+      }
+      await processMatured();
+    } catch {}
+  }
+  setInterval(scanRecentTransmissions, 15_000);
 
   async function handleConfirmedTransmission(item?: QItem) {
     let phase = 'init';
