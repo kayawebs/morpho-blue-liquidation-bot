@@ -324,7 +324,7 @@ async function main() {
         throw new Error('market state not available');
       }
       phase = 'buildMarketObj';
-      // 兼容 viem 返回的 tuple 结果，显式映射到具名字段，避免 lltv 丢失
+      // 兼容 viem 返回的 tuple 结果，显式映射到具名字段，并确保 lltv 为 bigint
       const mp = Array.isArray(params)
         ? {
             loanToken: (params as any)[0],
@@ -334,6 +334,10 @@ async function main() {
             lltv: (params as any)[4],
           }
         : (params as any);
+      const mp2 = {
+        ...mp,
+        lltv: typeof (mp as any).lltv === 'bigint' ? (mp as any).lltv : BigInt((mp as any).lltv),
+      } as any;
       paramsDump = {
         loanToken: (mp as any)?.loanToken,
         collateralToken: (mp as any)?.collateralToken,
@@ -341,10 +345,14 @@ async function main() {
         irm: (mp as any)?.irm,
         lltv: (mp as any)?.lltv?.toString?.() ?? String((mp as any)?.lltv),
       };
-      const marketObj = new (await import("@morpho-org/blue-sdk")).Market({
+      phase = 'newMarketParams';
+      const MarketNS = await import("@morpho-org/blue-sdk");
+      const marketParamsObj = new (MarketNS as any).MarketParams(mp2);
+      phase = 'newMarket';
+      const marketObj = new (MarketNS as any).Market({
         chainId: MARKET.chainId,
         id: MARKET.marketId as any,
-        params: new (await import("@morpho-org/blue-sdk")).MarketParams(mp as any),
+        params: marketParamsObj,
         price: price1e36 as any,
         totalSupplyAssets: view.totalSupplyAssets,
         totalSupplyShares: view.totalSupplyShares,
