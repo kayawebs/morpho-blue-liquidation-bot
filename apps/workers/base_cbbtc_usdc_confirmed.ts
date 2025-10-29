@@ -339,27 +339,42 @@ async function main() {
         lltv: typeof (mp as any).lltv === 'bigint' ? (mp as any).lltv : BigInt((mp as any).lltv),
       } as any;
       paramsDump = {
-        loanToken: (mp as any)?.loanToken,
-        collateralToken: (mp as any)?.collateralToken,
-        oracle: (mp as any)?.oracle,
-        irm: (mp as any)?.irm,
-        lltv: (mp as any)?.lltv?.toString?.() ?? String((mp as any)?.lltv),
+        loanToken: (mp2 as any)?.loanToken,
+        collateralToken: (mp2 as any)?.collateralToken,
+        oracle: (mp2 as any)?.oracle,
+        irm: (mp2 as any)?.irm,
+        lltv: (mp2 as any)?.lltv?.toString?.() ?? String((mp2 as any)?.lltv),
       };
       phase = 'newMarketParams';
       const MarketNS = await import("@morpho-org/blue-sdk");
       const marketParamsObj = new (MarketNS as any).MarketParams(mp2);
       phase = 'newMarket';
+      const asBn = (v: any): bigint => {
+        if (typeof v === 'bigint') return v;
+        if (typeof v === 'number') return BigInt(Math.trunc(v));
+        if (typeof v === 'string') return BigInt(v);
+        throw new Error('bad bigint input');
+      };
+      const priceBn = asBn(price1e36);
+      const viewNorm = {
+        totalSupplyAssets: asBn(view.totalSupplyAssets),
+        totalSupplyShares: asBn(view.totalSupplyShares),
+        totalBorrowAssets: asBn(view.totalBorrowAssets),
+        totalBorrowShares: asBn(view.totalBorrowShares),
+        lastUpdate: asBn(view.lastUpdate),
+        fee: asBn(view.fee),
+      };
       const marketObj = new (MarketNS as any).Market({
         chainId: MARKET.chainId,
         id: MARKET.marketId as any,
         params: marketParamsObj,
-        price: price1e36 as any,
-        totalSupplyAssets: view.totalSupplyAssets,
-        totalSupplyShares: view.totalSupplyShares,
-        totalBorrowAssets: view.totalBorrowAssets,
-        totalBorrowShares: view.totalBorrowShares,
-        lastUpdate: view.lastUpdate,
-        fee: view.fee,
+        price: priceBn,
+        totalSupplyAssets: viewNorm.totalSupplyAssets,
+        totalSupplyShares: viewNorm.totalSupplyShares,
+        totalBorrowAssets: viewNorm.totalBorrowAssets,
+        totalBorrowShares: viewNorm.totalBorrowShares,
+        lastUpdate: viewNorm.lastUpdate,
+        fee: viewNorm.fee,
       }).accrueInterest(Math.floor(Date.now() / 1000).toString());
 
       phase = 'pickBatch';
@@ -401,6 +416,7 @@ async function main() {
       if (attempts > 0) console.log(`🔔 [Confirmed] transmit触发：attempts=${attempts}, successes=${successes}`);
     } catch (e) {
       const errMsg = (e as any)?.message ?? String(e);
+      const errStack = (e as any)?.stack;
       const context: Record<string, any> = {
         aggregator: MARKET.aggregator,
         head: head?.toString?.(),
@@ -435,6 +451,7 @@ async function main() {
         }
       } catch {}
       console.warn("⚠️ handleConfirmedTransmission error:", errMsg, context);
+      if (errStack) console.warn("stack=\n" + errStack);
     }
   }
 
