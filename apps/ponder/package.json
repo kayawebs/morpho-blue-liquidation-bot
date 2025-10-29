@@ -15,10 +15,10 @@
     "test": "tsx test/script.ts"
   },
   "dependencies": {
-    "hono": "^4.5.0"
+    "hono": "^4.5.0",
+    "@morpho-blue-liquidation-bot/config": "workspace:*"
   },
   "devDependencies": {
-    "@morpho-blue-liquidation-bot/config": "workspace:*",
     "@morpho-org/test": "^2.1.1",
     "@ponder/client": "^0.11.1",
     "@types/node": "^22.13.14"

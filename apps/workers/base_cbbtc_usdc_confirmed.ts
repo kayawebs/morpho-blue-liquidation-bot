@@ -25,7 +25,8 @@ const MARKET = {
   chainId: base.id,
   marketId: "0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836" as const,
   morphoAddress: "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb" as Address,
-  aggregator: "0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8" as Address,
+  // Default aggregator address; can be overridden by env AGGREGATOR_ADDRESS_<chainId>
+  aggregator: (process.env[`AGGREGATOR_ADDRESS_${base.id}`] as Address) ?? ("0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8" as Address),
 };
 
 // OCR2 NewTransmission 事件（最小 ABI）
@@ -80,6 +81,7 @@ async function main() {
   );
 
   console.log("🚀 启动确认型 Worker: Base cbBTC/USDC");
+  console.log(`🔗 Aggregator: ${MARKET.aggregator}`);
 
   // 执行器与定价/流动性组件（沿用现有实现）
   const basePricer = new BaseChainlinkPricer();
@@ -213,6 +215,8 @@ async function main() {
   const seen = new Set<string>();
   const CONFIRMATIONS = 1; // 固定为1，不提供配置
   let head: bigint = 0n;
+  let eventsReceived = 0;
+  let eventsProcessed = 0;
 
   // 订阅 OCR2 NewTransmission（确认后处理）
   const evt = getAbiItem({ abi: OCR2_NEW_TRANSMISSION as any, name: "NewTransmission" }) as any;
@@ -229,6 +233,7 @@ async function main() {
           txIndex: Number(l.transactionIndex ?? 0),
           logIndex: Number(l.logIndex ?? 0),
         });
+        eventsReceived++;
       }
       // 稳定排序：按区块/交易/日志索引
       queue.sort((a, b) =>
@@ -259,6 +264,7 @@ async function main() {
     );
     for (const _ of matured) {
       await handleConfirmedTransmission();
+      eventsProcessed++;
     }
   }
   publicClient.watchBlocks({
@@ -338,6 +344,30 @@ async function main() {
   await fetchCandidates();
   setInterval(fetchCandidates, CANDIDATE_REFRESH_MS);
   console.log("✅ 确认型策略已启动（等待 transmit 事件确认）");
+
+  // Lightweight metrics endpoint for observability
+  try {
+    const { createServer } = await import('http');
+    const startedAt = Date.now();
+    const server = createServer((_req, res) => {
+      if (_req.url === '/metrics') {
+        const body = JSON.stringify({
+          uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
+          aggregator: MARKET.aggregator,
+          events: { received: eventsReceived, processed: eventsProcessed, queued: queue.length },
+          head: head?.toString(),
+          candidates: candidates.length,
+          executors: liquidators.length,
+        });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(body);
+        return;
+      }
+      res.writeHead(404);
+      res.end('not found');
+    });
+    server.listen(48101, () => console.log('📊 Confirmed worker metrics on :48101/metrics'));
+  } catch {}
 }
 
 main().catch((e) => {
