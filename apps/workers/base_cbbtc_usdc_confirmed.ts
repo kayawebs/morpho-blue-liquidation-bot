@@ -296,11 +296,18 @@ async function main() {
         functionName: 'latestRoundData',
       });
       const { decimals, scaleFactor } = getAdapter(MARKET.chainId, MARKET.aggregator);
-      const answerRaw = round?.[1] as bigint | undefined; // int256 scaled by 10^decimals
+      // 兼容 viem 返回形态：数组索引 & 具名返回值
+      let answerRaw: bigint | undefined;
+      if (round && typeof round === 'object') {
+        if (typeof (round as any).answer === 'bigint') answerRaw = (round as any).answer as bigint;
+        else if (Array.isArray(round) && typeof (round as any)[1] === 'bigint') answerRaw = (round as any)[1] as bigint;
+      }
       if (typeof answerRaw !== 'bigint') {
         console.warn('⚠️ latestRoundData returned invalid answer', {
           aggregator: MARKET.aggregator,
-          roundRaw: Array.isArray(round) ? round.map((x: any) => (typeof x === 'bigint' ? x.toString() : x)) : round,
+          roundRaw: Array.isArray(round)
+            ? (round as any[]).map((x: any) => (typeof x === 'bigint' ? x.toString() : x))
+            : round,
         });
         return;
       }
