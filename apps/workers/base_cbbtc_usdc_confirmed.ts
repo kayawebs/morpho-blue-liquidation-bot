@@ -13,6 +13,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { readContract } from "viem/actions";
 
 import { LiquidationBot } from "../client/src/bot.js";
+import type { IndexerAPIResponse, PreLiquidatablePosition } from "../client/src/utils/types.js";
 import { UniswapV3Venue } from "../client/src/liquidityVenues/uniswapV3/index.js";
 import { BaseChainlinkPricer } from "../client/src/pricers/baseChainlink/index.js";
 import { morphoBlueAbi } from "../ponder/abis/MorphoBlue.js";
@@ -497,7 +498,32 @@ async function main() {
       }
       viable.sort((a, b) => (a.seizable === b.seizable ? 0 : a.seizable > b.seizable ? -1 : 1));
       const selected = viable.slice(0, liquidators.length);
+      // 预清算机会：从 Ponder API 获取（如可用），以减轻本地重计算负担
+      let preLiqSelected: PreLiquidatablePosition[] = [];
+      try {
+        const res = await fetch(new URL(`/chain/${MARKET.chainId}/liquidatable-positions`, PONDER_API_URL), {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ marketIds: [MARKET.marketId] }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { warnings: string[]; results: IndexerAPIResponse[] };
+          const entry = data.results?.find((r) => (r.market.id as any) === MARKET.marketId);
+          if (entry && Array.isArray(entry.positionsPreLiq)) {
+            // 选择前 N 个预清算（不与正常清算重复用户）
+            const taken = new Set(selected.map((x) => x.iposition.user.toLowerCase()));
+            const sorted = [...entry.positionsPreLiq].sort((a, b) => (a.seizableCollateral === b.seizableCollateral ? 0 : a.seizableCollateral > b.seizableCollateral ? -1 : 1));
+            for (const p of sorted) {
+              if (preLiqSelected.length >= liquidators.length) break;
+              if (taken.has(p.user.toLowerCase())) continue;
+              preLiqSelected.push(p);
+            }
+          }
+        }
+      } catch {}
       phase = 'executeLiquidations';
+      // 先尝试预清算（若存在），然后再尝试常规清算
+      const preLiqResults = await Promise.all(
+        preLiqSelected.map((p, i) => liquidators[i]!.preLiquidateSingle(marketObj, p)),
+      );
       const results = await Promise.all(
         selected.map((v, i) =>
           liquidators[i]!.liquidateSingle(
@@ -506,9 +532,9 @@ async function main() {
           ),
         ),
       );
-      const attempts = selected.length;
-      const successes = results.filter(Boolean).length;
-      console.log(`🧾 [Confirmed] handled transmit @ ${nowIso()} attempts=${attempts}, successes=${successes}, candidates=${candidates.length}`);
+      const attempts = selected.length + preLiqSelected.length;
+      const successes = results.filter(Boolean).length + preLiqResults.filter(Boolean).length;
+      console.log(`🧾 [Confirmed] handled transmit @ ${nowIso()} attempts=${attempts} (preLiq=${preLiqSelected.length}, liq=${selected.length}), successes=${successes}, candidates=${candidates.length}`);
       pushAudit({ ts: nowIso(), status: 'processed', tx: item?.txHash, block: item?.blockNumber?.toString?.(), attempts, successes });
       if (attempts === 0) {
         console.log(`[diag] no viable positions: scanned=${batch.length} viable=0`);
