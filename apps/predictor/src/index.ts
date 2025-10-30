@@ -13,6 +13,7 @@ import { startOracleWatcher } from './oracleWatcher.js';
 import { startAutoCalibrateScheduler } from './autoCalibrate.js';
 import { seedOracleThresholdsFromConfig } from './seedThresholds.js';
 import { runStartupFit } from './startupFit.js';
+import { recordAgg100ms } from './memory.js';
 
 async function main() {
   // Fetch proxy is applied per-request inside HttpPollConnector.
@@ -59,6 +60,8 @@ async function main() {
       if (lastBin[s] === b) continue;
       const ag = agg.aggregated(s);
       if (typeof ag.price === 'number' && Number.isFinite(ag.price)) {
+        // Write both in-memory (near-window fast path) and DB (persistence)
+        recordAgg100ms(s, b, ag.price);
         insertAgg100ms(s, b, ag.price);
         lastBin[s] = b;
       }

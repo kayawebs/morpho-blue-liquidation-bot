@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { pool } from './db.js';
 import { PriceAggregator } from './aggregator.js';
+import { getPrice100msLeft, getPrice100msNearest } from './memory.js';
 import { createPublicClient, http } from 'viem';
 import { readContract } from 'viem/actions';
 import { AGGREGATOR_V2V3_ABI } from './abis/chainlink.js';
@@ -16,7 +17,12 @@ export function buildApp(deps: PredictorDeps) {
   const appCfg = loadConfig();
 
   async function priceAt100ms(symbol: string, tsMs: number): Promise<number | undefined> {
-    // nearest not after tsMs (left-join), fallback to nearest overall within 300ms
+    // Try memory near-window first: left join semantics, then nearest within +300ms
+    const memLeft = getPrice100msLeft(symbol, Math.floor(tsMs));
+    if (Number.isFinite(memLeft as any)) return memLeft as number;
+    const memNear = getPrice100msNearest(symbol, Math.floor(tsMs), 300);
+    if (Number.isFinite(memNear as any)) return memNear as number;
+    // Fallback to DB persistence
     const { rows } = await pool.query(
       `SELECT price, ts_ms FROM cex_agg_100ms WHERE symbol=$1 AND ts_ms <= $2 ORDER BY ts_ms DESC LIMIT 1`,
       [symbol, Math.floor(tsMs)],
