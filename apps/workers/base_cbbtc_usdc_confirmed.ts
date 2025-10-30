@@ -111,6 +111,10 @@ async function main() {
   let candidates: Address[] = [];
   let nextIdx = 0;
 
+  function nowIso() {
+    return new Date().toISOString();
+  }
+
   async function fetchCandidates(): Promise<void> {
     try {
       if (CANDIDATE_SOURCE === "ponder") {
@@ -129,7 +133,7 @@ async function main() {
         await hydrateCandidatesFromLogs();
       }
       candidates = [...candidateSet] as Address[];
-      console.log(`👥 Candidates loaded: ${candidates.length}`);
+      console.log(`👥 Candidates loaded: ${candidates.length} @ ${nowIso()}`);
     } catch (e) {
       console.warn("⚠️ candidates fetch error:", e);
     }
@@ -338,6 +342,32 @@ async function main() {
     let phase = 'init';
     let paramsDump: any = undefined;
     try {
+      // 打印本次 transmit 的基本上下文（区块/交易/时间）
+      if (item?.txHash) {
+        try {
+          const receipt = await (publicClient as any).getTransactionReceipt({ hash: item.txHash as `0x${string}` });
+          const log = receipt?.logs?.find((l: any) => String(l.address).toLowerCase() === String(MARKET.aggregator).toLowerCase());
+          let roundIdStr: string | undefined;
+          let answerStr: string | undefined;
+          if (log) {
+            const OCR2_EVENT = getAbiItem({
+              abi: [{ type: 'event', name: 'NewTransmission', inputs: [
+                { indexed: true, name: 'aggregatorRoundId', type: 'uint32' },
+                { indexed: false, name: 'answer', type: 'int192' },
+                { indexed: false, name: 'transmitter', type: 'address' },
+                { indexed: false, name: 'observations', type: 'int192[]' },
+                { indexed: false, name: 'observers', type: 'bytes' },
+                { indexed: false, name: 'rawReportContext', type: 'bytes32' },
+              ]}], name: 'NewTransmission',
+            }) as any;
+            const dec = decodeEventLog({ abi: [OCR2_EVENT], data: log.data, topics: log.topics as any });
+            const args: any = dec?.args ?? {};
+            roundIdStr = (args?.aggregatorRoundId as any)?.toString?.() ?? String(args?.aggregatorRoundId);
+            answerStr = (args?.answer as any)?.toString?.();
+          }
+          console.log(`🔔 [Confirmed] transmit detected @ ${nowIso()} block=${receipt?.blockNumber?.toString?.()} tx=${item.txHash} round=${roundIdStr ?? '-'} answerRaw=${answerStr ?? '-'}`);
+        } catch {}
+      }
       // 读取最新 on-chain 答案
       phase = 'readLatestRoundData';
       const round: any = await (publicClient as any).readContract({
@@ -460,7 +490,7 @@ async function main() {
       );
       const attempts = selected.length;
       const successes = results.filter(Boolean).length;
-      if (attempts > 0) console.log(`🔔 [Confirmed] transmit触发：attempts=${attempts}, successes=${successes}`);
+      console.log(`🧾 [Confirmed] handled transmit @ ${nowIso()} attempts=${attempts}, successes=${successes}, candidates=${candidates.length}`);
     } catch (e) {
       const errMsg = (e as any)?.message ?? String(e);
       const errStack = (e as any)?.stack;
