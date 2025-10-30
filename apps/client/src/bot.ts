@@ -202,11 +202,13 @@ export class LiquidationBot {
         console.log(
           `${this.logTag}ℹ️ Skipped ${position.user} on ${MarketUtils.getMarketId(marketParams)} (not profitable)`,
         );
+      return success;
     } catch (error) {
       console.error(
         `${this.logTag}Failed to pre-liquidate ${position.user} on ${MarketUtils.getMarketId(marketParams)}`,
         error,
       );
+      return false;
     }
   }
 
@@ -360,5 +362,10 @@ export class LiquidationBot {
   // Fast-path public method for mempool-triggered liquidation of a single position
   async liquidateSingle(market: IMarket, position: LiquidatablePosition) {
     return this.liquidate(market, position);
+  }
+
+  // Public method to perform a single pre-liquidation using a prepared PreLiquidatablePosition
+  async preLiquidateSingle(market: IMarket, position: PreLiquidatablePosition) {
+    return this.preLiquidate(market, position);
   }
 }
