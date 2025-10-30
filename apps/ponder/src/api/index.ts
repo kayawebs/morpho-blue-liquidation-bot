@@ -90,4 +90,93 @@ app.post("/chain/:chainId/candidates", async (c) => {
   return c.json(out);
 });
 
+/**
+ * Fetch positions for given markets, optionally filtering to those with pre-liquidation authorization
+ * and optionally including the related pre-liquidation contract addresses (and count).
+ * Body: { marketIds: Hex[], onlyPreLiq?: boolean, includeContracts?: boolean }
+ */
+app.post("/chain/:chainId/positions", async (c) => {
+  const { chainId: chainIdRaw } = c.req.param();
+  const { marketIds: marketIdsRaw, onlyPreLiq, includeContracts } = (await c.req.json()) as unknown as {
+    marketIds: Hex[];
+    onlyPreLiq?: boolean;
+    includeContracts?: boolean;
+  };
+
+  if (!Array.isArray(marketIdsRaw) || marketIdsRaw.length === 0) {
+    return c.json({ error: "Request body must include a non-empty `marketIds` array." }, 400);
+  }
+  const chainId = Number.parseInt(chainIdRaw, 10);
+  const marketIds = [...new Set(marketIdsRaw)];
+
+  // All borrower positions for the requested markets
+  const posRows = await db.query.position.findMany({
+    where: (row) => and(eq(row.chainId, chainId), inArray(row.marketId, marketIds), gt(row.borrowShares, 0n)),
+  });
+
+  // Authorized pre-liquidation contracts mapped by (marketId,user)
+  const preRows = await db
+    .select({ position: schema.position, pre: schema.preLiquidationContract })
+    .from(schema.preLiquidationContract)
+    .innerJoin(
+      schema.authorization,
+      and(
+        eq(schema.authorization.chainId, schema.preLiquidationContract.chainId),
+        eq(schema.authorization.authorizee, schema.preLiquidationContract.address),
+        eq(schema.authorization.isAuthorized, true),
+      ),
+    )
+    .innerJoin(
+      schema.position,
+      and(
+        eq(schema.position.chainId, schema.preLiquidationContract.chainId),
+        eq(schema.position.marketId, schema.preLiquidationContract.marketId),
+        eq(schema.position.user, schema.authorization.authorizer),
+        gt(schema.position.borrowShares, 0n),
+      ),
+    )
+    .where(and(eq(schema.preLiquidationContract.chainId, chainId), inArray(schema.preLiquidationContract.marketId, marketIds)));
+
+  const preMap = new Map<string, (typeof preRows)[number]["pre"][]>();
+  for (const r of preRows) {
+    const key = `${r.position.marketId}:${r.position.user.toLowerCase()}`;
+    const arr = preMap.get(key) ?? [];
+    arr.push(r.pre);
+    preMap.set(key, arr);
+  }
+
+  // Group positions by market
+  const byMarket = new Map<string, typeof posRows>();
+  for (const p of posRows) {
+    const k = p.marketId as string;
+    if (!byMarket.has(k)) byMarket.set(k, []);
+    byMarket.get(k)!.push(p);
+  }
+
+  const results = [] as any[];
+  for (const mid of marketIds) {
+    const list = (byMarket.get(mid as string) ?? []).filter((p) => {
+      if (!onlyPreLiq) return true;
+      const key = `${p.marketId}:${p.user.toLowerCase()}`;
+      return preMap.has(key);
+    });
+    const items = list.map((p) => {
+      const key = `${p.marketId}:${p.user.toLowerCase()}`;
+      const contracts = preMap.get(key) ?? [];
+      return {
+        user: p.user,
+        supplyShares: p.supplyShares,
+        borrowShares: p.borrowShares,
+        collateral: p.collateral,
+        preLiqAuthorized: contracts.length > 0,
+        preLiqCount: contracts.length,
+        preLiqContracts: includeContracts ? contracts.map((x) => x.address) : undefined,
+      };
+    });
+    results.push({ marketId: mid, positions: items });
+  }
+
+  return c.json(replaceBigInts({ results }));
+});
+
 export default app;
