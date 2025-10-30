@@ -240,6 +240,8 @@ async function main() {
   let head: bigint = 0n;
   let eventsReceived = 0;
   let eventsProcessed = 0;
+  let attemptsTotal = 0;
+  let successesTotal = 0;
   type AuditEvent = {
     ts: string;
     status: 'queued' | 'processed' | 'error';
@@ -511,6 +513,8 @@ async function main() {
       if (attempts === 0) {
         console.log(`[diag] no viable positions: scanned=${batch.length} viable=0`);
       }
+      attemptsTotal += attempts;
+      successesTotal += successes;
     } catch (e) {
       const errMsg = (e as any)?.message ?? String(e);
       const errStack = (e as any)?.stack;
@@ -570,6 +574,7 @@ async function main() {
           head: head?.toString(),
           candidates: candidates.length,
           executors: liquidators.length,
+          liquidations: { attemptsTotal, successesTotal },
           lastEvents: audits.slice(-10),
         });
         res.writeHead(200, { 'content-type': 'application/json' });
