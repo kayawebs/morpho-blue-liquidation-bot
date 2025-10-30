@@ -72,14 +72,14 @@ function normalizeWeights(w: Record<string, number>): Record<string, number> {
   return out;
 }
 
-async function fetchPrevConfig(chainId: number, addr: string): Promise<{ lag: number; offset: number; hb: number; bias: number } | undefined> {
+async function fetchPrevConfig(chainId: number, addr: string): Promise<{ lag: number; lagMs: number; offset: number; hb: number; bias: number } | undefined> {
   const { rows } = await pool.query(
-    `SELECT heartbeat_seconds, offset_bps, lag_seconds, COALESCE(bias_bps,0) AS bias_bps
+    `SELECT heartbeat_seconds, offset_bps, lag_seconds, lag_ms, COALESCE(bias_bps,0) AS bias_bps
      FROM oracle_pred_config WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)`,
     [chainId, addr],
   );
   if (rows.length === 0) return undefined;
-  return { hb: Number(rows[0].heartbeat_seconds), offset: Number(rows[0].offset_bps), lag: Number(rows[0].lag_seconds), bias: Number(rows[0].bias_bps) };
+  return { hb: Number(rows[0].heartbeat_seconds), offset: Number(rows[0].offset_bps), lag: Number(rows[0].lag_seconds), lagMs: Number(rows[0].lag_ms ?? 0), bias: Number(rows[0].bias_bps) };
 }
 
 async function fetchPrevWeights(chainId: number, addr: string): Promise<Record<string, number>> {
@@ -191,6 +191,7 @@ export async function runAutoCalibrateOnce() {
     const lagRaw = Number(best.lag);
     // EWMA smoothing against previous config
     const lagSmoothed = prevCfg ? Math.round(alpha * lagRaw + (1 - alpha) * prevCfg.lag) : lagRaw;
+    const lagSmoothedMs = prevCfg ? Math.round(alpha * (lagRaw * 1000) + (1 - alpha) * (prevCfg.lagMs || prevCfg.lag * 1000)) : (lagRaw * 1000);
     const offsetSmoothed = prevCfg && !Number.isFinite(feedOffset)
       ? Math.round(alpha * offsetRaw + (1 - alpha) * prevCfg.offset)
       : offsetRaw;
@@ -207,10 +208,10 @@ export async function runAutoCalibrateOnce() {
     const weightsSmoothed = normalizeWeights(smoothW);
     // Persist results
     await pool.query(
-      `INSERT INTO oracle_pred_config(chain_id, oracle_addr, heartbeat_seconds, offset_bps, bias_bps, decimals, scale_factor, lag_seconds, updated_at)
-       VALUES($1,$2,$3,$4,$5, COALESCE((SELECT decimals FROM oracle_pred_config WHERE chain_id=$1 AND oracle_addr=$2), $6), COALESCE((SELECT scale_factor FROM oracle_pred_config WHERE chain_id=$1 AND oracle_addr=$2), $7), $8, now())
-       ON CONFLICT (chain_id, oracle_addr) DO UPDATE SET heartbeat_seconds=EXCLUDED.heartbeat_seconds, offset_bps=EXCLUDED.offset_bps, bias_bps=EXCLUDED.bias_bps, lag_seconds=EXCLUDED.lag_seconds, updated_at=now()`,
-      [chainId, addr, hb, offsetSmoothed, biasSmoothed, Number(o.decimals), String(o.scaleFactor), lagSmoothed],
+      `INSERT INTO oracle_pred_config(chain_id, oracle_addr, heartbeat_seconds, offset_bps, bias_bps, decimals, scale_factor, lag_seconds, lag_ms, updated_at)
+       VALUES($1,$2,$3,$4,$5, COALESCE((SELECT decimals FROM oracle_pred_config WHERE chain_id=$1 AND oracle_addr=$2), $6), COALESCE((SELECT scale_factor FROM oracle_pred_config WHERE chain_id=$1 AND oracle_addr=$2), $7), $8, $9, now())
+       ON CONFLICT (chain_id, oracle_addr) DO UPDATE SET heartbeat_seconds=EXCLUDED.heartbeat_seconds, offset_bps=EXCLUDED.offset_bps, bias_bps=EXCLUDED.bias_bps, lag_seconds=EXCLUDED.lag_seconds, lag_ms=EXCLUDED.lag_ms, updated_at=now()`,
+      [chainId, addr, hb, offsetSmoothed, biasSmoothed, Number(o.decimals), String(o.scaleFactor), lagSmoothed, lagSmoothedMs],
     );
     // Update weights table
     await pool.query('DELETE FROM oracle_cex_weights WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)', [chainId, addr]);

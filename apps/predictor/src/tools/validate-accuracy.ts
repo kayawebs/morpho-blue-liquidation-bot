@@ -61,14 +61,14 @@ async function main() {
 
   // Load thresholds and lag
   const { rows: cfgRows } = await pool.query(
-    `SELECT offset_bps, heartbeat_seconds, lag_seconds FROM oracle_pred_config
+    `SELECT offset_bps, heartbeat_seconds, lag_seconds, lag_ms FROM oracle_pred_config
      WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)`,
     [chainId, oracle],
   );
   if (cfgRows.length === 0) throw new Error('config not found; seed or run calibrate first');
   const offsetBps = Number(cfgRows[0].offset_bps);
   const heartbeat = Number(cfgRows[0].heartbeat_seconds);
-  const lagMs = Number(cfgRows[0].lag_seconds) * 1000;
+  const lagMs = Number(cfgRows[0].lag_ms ?? 0) || (Number(cfgRows[0].lag_seconds) * 1000);
 
   // Fetch recent events ascending to compute lastAnswer deltas
   const { rows: evRows } = await pool.query(
@@ -143,4 +143,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-

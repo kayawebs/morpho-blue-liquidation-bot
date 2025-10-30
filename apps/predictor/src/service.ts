@@ -78,7 +78,7 @@ export function buildApp(deps: PredictorDeps) {
   });
 
   app.get('/oracles', async (c) => {
-    const { rows } = await pool.query('SELECT chain_id, oracle_addr, heartbeat_seconds, offset_bps, bias_bps, decimals, scale_factor, lag_seconds FROM oracle_pred_config');
+    const { rows } = await pool.query('SELECT chain_id, oracle_addr, heartbeat_seconds, offset_bps, bias_bps, decimals, scale_factor, lag_seconds, lag_ms FROM oracle_pred_config');
     return c.json(rows);
   });
 
@@ -137,7 +137,7 @@ export function buildApp(deps: PredictorDeps) {
     const addr = c.req.param('addr');
     const sym = c.req.query('symbol') ?? 'BTCUSDC';
     const rowRes = await pool.query(
-      'SELECT heartbeat_seconds, offset_bps, decimals, scale_factor FROM oracle_pred_config WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)',
+      'SELECT heartbeat_seconds, offset_bps, decimals, scale_factor, lag_seconds, lag_ms FROM oracle_pred_config WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)',
       [chainId, addr],
     );
     if (rowRes.rows.length === 0) return c.json({ error: 'config not found' }, 404);
@@ -262,9 +262,12 @@ export function buildApp(deps: PredictorDeps) {
     const hasMs = tsMsQ !== undefined;
     const ts = hasMs ? Number(tsMsQ) : Number(tsQ);
     if (!Number.isFinite(ts)) return c.json({ error: hasMs ? 'tsMs (milliseconds) required' : 'ts (seconds) required' }, 400);
-    const lag = Number(c.req.query('lag') ?? 0);
-    const lagMs = Number(c.req.query('lagMs') ?? 0);
-    const at = hasMs ? (ts - (Number.isFinite(lagMs) ? lagMs : 0)) : (ts - (Number.isFinite(lag) ? lag : 0));
+    const lagQ = Number(c.req.query('lag'));
+    const lagMsQ = Number(c.req.query('lagMs'));
+    // Default to DB lag_ms if no override provided
+    const dbLagMs = Number(row.lag_ms ?? 0) || (Number(row.lag_seconds ?? 0) * 1000);
+    const effLagMs = Number.isFinite(lagMsQ) ? lagMsQ : (Number.isFinite(lagQ) ? lagQ * 1000 : dbLagMs);
+    const at = hasMs ? (ts - effLagMs) : (ts - Math.round(effLagMs / 1000));
     const rowRes = await pool.query(
       'SELECT heartbeat_seconds, offset_bps, decimals, scale_factor FROM oracle_pred_config WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)',
       [chainId, addr],
@@ -294,7 +297,7 @@ export function buildApp(deps: PredictorDeps) {
     }
     const scale = BigInt(row.scale_factor);
     const { answer, price1e36 } = adapter.compute({ agg: aggMap, decimals: Number(row.decimals), scaleFactor: scale });
-    return c.json({ chainId, oracle: addr, ts: hasMs ? undefined : ts, tsMs: hasMs ? ts : undefined, lag: hasMs ? undefined : (Number.isFinite(lag) ? lag : 0), lagMs: hasMs ? (Number.isFinite(lagMs) ? lagMs : 0) : undefined, at: hasMs ? undefined : at, atMs: hasMs ? at : undefined, required, aggMap, answer, price1e36: price1e36?.toString() });
+    return c.json({ chainId, oracle: addr, ts: hasMs ? undefined : ts, tsMs: hasMs ? ts : undefined, lag: hasMs ? undefined : Math.round(effLagMs / 1000), lagMs: effLagMs, at: hasMs ? undefined : at, atMs: hasMs ? at : undefined, required, aggMap, answer, price1e36: price1e36?.toString() });
   });
 
   return app;

@@ -24,11 +24,13 @@ export async function initSchema() {
       decimals INTEGER NOT NULL,
       scale_factor NUMERIC NOT NULL,
       lag_seconds INTEGER NOT NULL DEFAULT 0,
+      lag_ms INTEGER NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (chain_id, oracle_addr)
     );
     ALTER TABLE oracle_pred_config ADD COLUMN IF NOT EXISTS lag_seconds INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE oracle_pred_config ADD COLUMN IF NOT EXISTS bias_bps INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE oracle_pred_config ADD COLUMN IF NOT EXISTS lag_ms INTEGER NOT NULL DEFAULT 0;
 
     CREATE TABLE IF NOT EXISTS oracle_pred_samples (
       id BIGSERIAL PRIMARY KEY,

@@ -124,9 +124,9 @@ export async function runStartupFit() {
       // Persist: lag_seconds and default weights (normalized)
       const lagSeconds = Math.round(best.lagMs / 1000);
       await pool.query(
-        `UPDATE oracle_pred_config SET lag_seconds=$3, updated_at=now()
+        `UPDATE oracle_pred_config SET lag_seconds=$3, lag_ms=$4, updated_at=now()
          WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)`,
-        [chainId, addr, lagSeconds],
+        [chainId, addr, lagSeconds, best.lagMs],
       );
       // Clear previous weights, then insert
       await pool.query('DELETE FROM oracle_cex_weights WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)', [chainId, addr]);
