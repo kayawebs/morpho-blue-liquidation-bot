@@ -20,6 +20,7 @@ export async function initSchema() {
       oracle_addr TEXT NOT NULL,
       heartbeat_seconds INTEGER NOT NULL,
       offset_bps INTEGER NOT NULL,
+      bias_bps INTEGER NOT NULL DEFAULT 0,
       decimals INTEGER NOT NULL,
       scale_factor NUMERIC NOT NULL,
       lag_seconds INTEGER NOT NULL DEFAULT 0,
@@ -27,6 +28,7 @@ export async function initSchema() {
       PRIMARY KEY (chain_id, oracle_addr)
     );
     ALTER TABLE oracle_pred_config ADD COLUMN IF NOT EXISTS lag_seconds INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE oracle_pred_config ADD COLUMN IF NOT EXISTS bias_bps INTEGER NOT NULL DEFAULT 0;
 
     CREATE TABLE IF NOT EXISTS oracle_pred_samples (
       id BIGSERIAL PRIMARY KEY,
@@ -141,3 +143,13 @@ setInterval(async () => {
 export function insertAgg100ms(symbol: string, tsMs: number, price: number) {
   agg100Batch.push({ symbol, tsMs, price });
 }
+
+// TTL cleanup for 100ms table (default keep 7 days)
+let ttlDays = 7;
+try { const v = Number(process.env.PREDICTOR_100MS_TTL_DAYS); if (Number.isFinite(v) && v > 0) ttlDays = Math.floor(v); } catch {}
+setInterval(async () => {
+  try {
+    const cutoff = Date.now() - ttlDays * 24 * 60 * 60 * 1000;
+    await pool.query(`DELETE FROM cex_agg_100ms WHERE ts_ms < $1`, [Math.floor(cutoff)]);
+  } catch {}
+}, 60 * 60 * 1000);

@@ -78,7 +78,7 @@ export function buildApp(deps: PredictorDeps) {
   });
 
   app.get('/oracles', async (c) => {
-    const { rows } = await pool.query('SELECT chain_id, oracle_addr, heartbeat_seconds, offset_bps, decimals, scale_factor, lag_seconds FROM oracle_pred_config');
+    const { rows } = await pool.query('SELECT chain_id, oracle_addr, heartbeat_seconds, offset_bps, bias_bps, decimals, scale_factor, lag_seconds FROM oracle_pred_config');
     return c.json(rows);
   });
 
@@ -91,6 +91,45 @@ export function buildApp(deps: PredictorDeps) {
       [chainId, addr],
     );
     return c.json(rows);
+  });
+
+  // Recent fit summary from samples: p50/p90 absolute error and signed bias median
+  app.get('/oracles/:chainId/:addr/fitSummary', async (c) => {
+    const chainId = Number(c.req.param('chainId'));
+    const addr = c.req.param('addr');
+    const limit = Math.max(10, Math.min(2000, Number(c.req.query('limit') ?? 500)));
+    const { rows } = await pool.query(
+      `SELECT answer, cex_price FROM oracle_pred_samples
+       WHERE chain_id=$1 AND lower(oracle_addr)=lower($2) AND event_ts IS NOT NULL
+       ORDER BY event_ts DESC LIMIT $3`,
+      [chainId, addr, limit],
+    );
+    const signed: number[] = [];
+    const absErr: number[] = [];
+    for (const r of rows) {
+      const ans = Number(r.answer);
+      const cpx = Number(r.cex_price);
+      if (!(ans > 0) || !(cpx > 0)) continue;
+      const ebps = Math.round((ans / cpx - 1) * 10_000);
+      signed.push(ebps);
+      absErr.push(Math.abs(ebps));
+    }
+    const med = (arr: number[]) => {
+      if (arr.length === 0) return undefined as any;
+      const a = [...arr].sort((x,y)=>x-y); const n = a.length; const i = n % 2 === 1 ? (n>>1) : ((n>>1)-1);
+      return a[i]!;
+    };
+    const pct = (arr: number[], q: number) => {
+      if (arr.length === 0) return undefined as any;
+      const a = [...arr].sort((x,y)=>x-y); const idx = Math.min(a.length-1, Math.max(0, Math.floor((a.length-1)*q)));
+      return a[idx]!;
+    };
+    return c.json({
+      samples: signed.length,
+      p50AbsBps: med(absErr),
+      p90AbsBps: pct(absErr, 0.9),
+      biasMedianBps: med(signed),
+    });
   });
 
   app.get('/oracles/:chainId/:addr/prediction', async (c) => {
