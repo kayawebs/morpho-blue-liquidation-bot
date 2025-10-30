@@ -240,6 +240,32 @@ async function main() {
   let head: bigint = 0n;
   let eventsReceived = 0;
   let eventsProcessed = 0;
+  type AuditEvent = {
+    ts: string;
+    status: 'queued' | 'processed' | 'error';
+    block?: string;
+    tx?: string;
+    roundId?: string;
+    answerRaw?: string;
+    attempts?: number;
+    successes?: number;
+    phase?: string;
+    error?: string;
+  };
+  const audits: AuditEvent[] = [];
+  const auditIdxByTx = new Map<string, number>();
+  function pushAudit(a: AuditEvent) {
+    if (a.tx) {
+      const idx = auditIdxByTx.get(a.tx);
+      if (idx !== undefined) {
+        audits[idx] = { ...audits[idx]!, ...a };
+        return;
+      }
+    }
+    if (audits.length >= 20) audits.shift();
+    audits.push(a);
+    if (a.tx) auditIdxByTx.set(a.tx, audits.length - 1);
+  }
 
   const VERBOSE = process.env.WORKER_VERBOSE === '1';
 
@@ -262,6 +288,18 @@ async function main() {
         });
         eventsReceived++;
         if (VERBOSE) console.log(`🛰 onLogs queued key=${key} queue=${queue.length}`);
+        // 记录审计：尽量带上 roundId/answer（从解码参数，若可用）
+        try {
+          const args: any = (l as any).args ?? {};
+          pushAudit({
+            ts: nowIso(),
+            status: 'queued',
+            block: (l.blockNumber as bigint)?.toString?.(),
+            tx: l.transactionHash as string | undefined,
+            roundId: (args?.aggregatorRoundId as any)?.toString?.() ?? String(args?.aggregatorRoundId ?? ''),
+            answerRaw: (args?.answer as any)?.toString?.(),
+          });
+        } catch {}
       }
       // 稳定排序：按区块/交易/日志索引
       queue.sort((a, b) =>
@@ -343,6 +381,7 @@ async function main() {
             answerStr = (args?.answer as any)?.toString?.();
           }
           console.log(`🔔 [Confirmed] transmit detected @ ${nowIso()} block=${receipt?.blockNumber?.toString?.()} tx=${item.txHash} round=${roundIdStr ?? '-'} answerRaw=${answerStr ?? '-'}`);
+          pushAudit({ ts: nowIso(), status: 'queued', block: receipt?.blockNumber?.toString?.(), tx: item.txHash, roundId: roundIdStr, answerRaw: answerStr });
         } catch {}
       }
       // 读取最新 on-chain 答案
@@ -468,6 +507,10 @@ async function main() {
       const attempts = selected.length;
       const successes = results.filter(Boolean).length;
       console.log(`🧾 [Confirmed] handled transmit @ ${nowIso()} attempts=${attempts}, successes=${successes}, candidates=${candidates.length}`);
+      pushAudit({ ts: nowIso(), status: 'processed', tx: item?.txHash, block: item?.blockNumber?.toString?.(), attempts, successes });
+      if (attempts === 0) {
+        console.log(`[diag] no viable positions: scanned=${batch.length} viable=0`);
+      }
     } catch (e) {
       const errMsg = (e as any)?.message ?? String(e);
       const errStack = (e as any)?.stack;
@@ -505,6 +548,7 @@ async function main() {
         }
       } catch {}
       console.warn("⚠️ handleConfirmedTransmission error:", errMsg, context);
+      if (item?.txHash) pushAudit({ ts: nowIso(), status: 'error', tx: item.txHash, block: item.blockNumber?.toString?.(), phase, error: errMsg });
       if (errStack) console.warn("stack=\n" + errStack);
     }
   }
@@ -526,6 +570,7 @@ async function main() {
           head: head?.toString(),
           candidates: candidates.length,
           executors: liquidators.length,
+          lastEvents: audits.slice(-10),
         });
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(body);
