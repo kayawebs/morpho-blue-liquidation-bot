@@ -21,7 +21,21 @@
 ## 2) 启动候选索引 Ponder（长期运行）
 - 市场配置：根目录 `markets.json`
 - 启动：`pnpm ponder:start`
-- 检查：`POST http://localhost:42069/chain/8453/candidates`（传入 `marketIds`）
+- 快速检查：`POST http://localhost:42069/chain/8453/candidates`（Body：`{ marketIds: ["<marketId>"] }`）
+- 常用 API：
+  - 清算与预清算机会（仅返回“可清算/可预清算”的仓位）
+    - `POST /chain/:chainId/liquidatable-positions`
+    - Body：`{ marketIds: ["<marketId>"] }`
+    - 示例：
+      - `curl -s -X POST http://localhost:42069/chain/8453/liquidatable-positions -H 'content-type: application/json' -d '{"marketIds":["0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836"]}'`
+  - 全量仓位（可选仅含“已授权预清算”的仓位；可选返回授权合约地址）
+    - `POST /chain/:chainId/positions`
+    - Body：`{ marketIds: ["<marketId>"], onlyPreLiq?: boolean, includeContracts?: boolean }`
+    - 示例：
+      - 全量：
+        - `curl -s -X POST http://localhost:42069/chain/8453/positions -H 'content-type: application/json' -d '{"marketIds":["0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836"]}'`
+      - 仅含预清算且返回合约：
+        - `curl -s -X POST http://localhost:42069/chain/8453/positions -H 'content-type: application/json' -d '{"marketIds":["0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836"],"onlyPreLiq":true,"includeContracts":true}'`
 
 ## 3) 启动 Worker（确认型，推荐基线）
 - 需要：Predictor + Ponder 均已运行；`.env` 中至少填写单执行器或多执行器配置。
