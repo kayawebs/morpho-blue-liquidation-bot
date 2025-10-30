@@ -12,7 +12,8 @@
     "start": "tsx src/index.ts",
     "manual-calibrate": "tsx src/tools/manual-calibrate.ts",
     "test:connectivity": "tsx src/tools/test-connectivity.ts",
-    "test:ws": "tsx src/tools/test-ws.ts"
+    "test:ws": "tsx src/tools/test-ws.ts",
+    "validate:accuracy": "tsx src/tools/validate-accuracy.ts"
   },
   "dependencies": {
     "pg": "^8.12.0",

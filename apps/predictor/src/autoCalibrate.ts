@@ -63,16 +63,48 @@ function weightGrids(keys: string[], step = 0.2): Record<string, number>[] {
   return out.filter((w) => Object.values(w).some((x) => x > 0));
 }
 
+function normalizeWeights(w: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  let sum = 0;
+  for (const [k, v] of Object.entries(w)) { const vv = Number(v); if (Number.isFinite(vv) && vv > 0) { out[k] = vv; sum += vv; } }
+  if (sum <= 0) return out;
+  for (const k of Object.keys(out)) out[k] = out[k]! / sum;
+  return out;
+}
+
+async function fetchPrevConfig(chainId: number, addr: string): Promise<{ lag: number; offset: number; hb: number; bias: number } | undefined> {
+  const { rows } = await pool.query(
+    `SELECT heartbeat_seconds, offset_bps, lag_seconds, COALESCE(bias_bps,0) AS bias_bps
+     FROM oracle_pred_config WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)`,
+    [chainId, addr],
+  );
+  if (rows.length === 0) return undefined;
+  return { hb: Number(rows[0].heartbeat_seconds), offset: Number(rows[0].offset_bps), lag: Number(rows[0].lag_seconds), bias: Number(rows[0].bias_bps) };
+}
+
+async function fetchPrevWeights(chainId: number, addr: string): Promise<Record<string, number>> {
+  const { rows } = await pool.query(
+    `SELECT source, weight FROM oracle_cex_weights WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)`,
+    [chainId, addr],
+  );
+  const out: Record<string, number> = {};
+  for (const r of rows) out[String(r.source).toLowerCase()] = Number(r.weight);
+  return out;
+}
+
 export async function runAutoCalibrateOnce() {
   const cfg = loadConfig();
   const oracles: any[] = (cfg as any).oracles ?? [];
-  const sources = ['binance', 'okx', 'coinbase'];
+  const sourcesAll = ['binance', 'okx', 'coinbase'];
   for (const o of oracles) {
     const chainId = Number(o.chainId);
     const addr = String(o.address);
     const symbol = String(o.symbol ?? 'BTCUSDC');
     const feedHb = Number(o.feedHeartbeatSeconds);
     const feedOffset = Number(o.feedDeviationBps);
+    const prevCfg = await fetchPrevConfig(chainId, addr);
+    const prevWeights = await fetchPrevWeights(chainId, addr);
+    const alpha = 0.3; // EWMA smoothing factor
     // Heartbeat from event gaps
     const events = await fetchEvents(chainId, addr, 2000);
     const ts = events.map((e) => e.ts).sort((a, b) => a - b);
@@ -80,15 +112,43 @@ export async function runAutoCalibrateOnce() {
     for (let i = 1; i < ts.length; i++) gaps.push(ts[i]! - ts[i - 1]!);
     // Heartbeat: if feed-specified present, respect it; else compute
     const hb = Number.isFinite(feedHb) ? feedHb : Math.max(10, Math.round(median(gaps) ?? 60));
-    // Tune lag/weights with a coarse grid to avoid heavy runtime
-    const lags = [0, 1, 2, 3, 5, 7, 10];
-    const subsetCombos = combos(sources).filter((c) => c.length >= 1);
+    // Candidate lags: include previous around ±1s plus coarse
+    const lagSet = new Set<number>([0,1,2,3,5,7,10]);
+    if (prevCfg && Number.isFinite(prevCfg.lag)) { lagSet.add(prevCfg.lag); lagSet.add(prevCfg.lag + 1); if (prevCfg.lag > 0) lagSet.add(prevCfg.lag - 1); }
+    const lags = Array.from(lagSet.values()).sort((a,b)=>a-b);
+    // Precompute per-event per-exchange prices at each lag to reduce repeated queries
+    const sources = sourcesAll.slice();
+    // Evaluate per-exchange individual errors to rank sources
+    const perExErrP90: Record<string, number> = {};
+    for (const ex of sources) {
+      const errs: number[] = [];
+      for (const e of events) {
+        const p = await fetchMedianAt(symbol, e.ts - (prevCfg?.lag ?? 0), ex);
+        if (p === undefined) continue;
+        const { rows } = await pool.query(
+          `SELECT answer FROM oracle_pred_samples WHERE chain_id=$1 AND lower(oracle_addr)=lower($2) AND event_ts=to_timestamp($3) LIMIT 1`,
+          [chainId, addr, e.ts],
+        );
+        const onchain = Number(rows[0]?.answer);
+        if (!Number.isFinite(onchain) || !(p > 0)) continue;
+        const ratio = onchain / p;
+        if (!Number.isFinite(ratio)) continue;
+        errs.push(Math.abs(Math.round((ratio - 1) * 10_000)));
+      }
+      if (errs.length > 10) perExErrP90[ex] = percentile(errs, 0.9) ?? Infinity;
+      else perExErrP90[ex] = Infinity;
+    }
+    const ranked = Object.entries(perExErrP90).sort((a,b)=>a[1]-b[1]).map(([k])=>k);
+    const topSources = ranked.slice(0, Math.min(3, ranked.length));
+    const subsetCombos = combos(topSources).filter((c) => c.length >= 1);
+    // For each lag and subset, run a fine grid over weights to minimize p90 abs error
     let best: any = undefined;
     for (const lag of lags) {
       for (const sub of subsetCombos) {
-        const weightList = weightGrids(sub, 0.2);
+        const weightList = weightGrids(sub, 0.05); // finer grid
         for (const w of weightList) {
-          const errs: number[] = [];
+          const errsAbs: number[] = [];
+          const errsSigned: number[] = [];
           for (const e of events) {
             const t = e.ts - lag;
             let num = 0, den = 0;
@@ -96,14 +156,13 @@ export async function runAutoCalibrateOnce() {
             for (const ex of sub) {
               const p = await fetchMedianAt(symbol, t, ex);
               if (p === undefined) { ok = false; break; }
-              num += p * (w[ex] ?? 0);
-              den += (w[ex] ?? 0);
+              const ww = w[ex] ?? 0;
+              num += p * ww;
+              den += ww;
             }
             if (!ok || den <= 0) continue;
             const pred = num / den;
             if (!(pred > 0)) continue;
-            // Fetch onchain answer: we have it in samples; simplify by using nearest sample row at e.ts
-            // Ideally, join with samples table. Here we recompute by reading samples table.
             const { rows } = await pool.query(
               `SELECT answer FROM oracle_pred_samples WHERE chain_id=$1 AND lower(oracle_addr)=lower($2) AND event_ts=to_timestamp($3) LIMIT 1`,
               [chainId, addr, e.ts],
@@ -112,36 +171,57 @@ export async function runAutoCalibrateOnce() {
             if (!Number.isFinite(onchain)) continue;
             const ratio = onchain / pred;
             if (!Number.isFinite(ratio)) continue;
-            errs.push(Math.abs(Math.round((ratio - 1) * 10_000)));
+            const ebps = Math.round((ratio - 1) * 10_000);
+            errsAbs.push(Math.abs(ebps));
+            errsSigned.push(ebps);
           }
-          if (errs.length < 20) continue;
-          const p50 = median(errs) ?? Infinity;
-          const p90 = percentile(errs, 0.9) ?? Infinity;
-          const cand = { lag, sources: sub, weights: w, samples: errs.length, p50, p90 };
+          if (errsAbs.length < 20) continue;
+          const p50 = median(errsAbs) ?? Infinity;
+          const p90 = percentile(errsAbs, 0.9) ?? Infinity;
+          const bias = median(errsSigned) ?? 0; // signed median as bias
+          const cand = { lag, sources: sub, weights: w, samples: errsAbs.length, p50, p90, bias };
           if (!best || p90 < best.p90 || (p90 === best.p90 && p50 < best.p50)) best = cand;
         }
       }
     }
     if (!best) continue;
     // Offset: if feed-specified present, respect it; else compute from residual p90 with floor
-    const offset = Number.isFinite(feedOffset) ? feedOffset : Math.max(5, Math.round(best.p90));
+    const offsetRaw = Number.isFinite(feedOffset) ? feedOffset : Math.max(5, Math.round(best.p90));
+    const biasRaw = Math.round(Number(best.bias ?? 0));
+    const lagRaw = Number(best.lag);
+    // EWMA smoothing against previous config
+    const lagSmoothed = prevCfg ? Math.round(alpha * lagRaw + (1 - alpha) * prevCfg.lag) : lagRaw;
+    const offsetSmoothed = prevCfg && !Number.isFinite(feedOffset)
+      ? Math.round(alpha * offsetRaw + (1 - alpha) * prevCfg.offset)
+      : offsetRaw;
+    const biasSmoothed = prevCfg ? Math.round(alpha * biasRaw + (1 - alpha) * prevCfg.bias) : biasRaw;
+    // Smooth weights with previous weights
+    const newW = normalizeWeights(best.weights as Record<string, number>);
+    const mergedSrcs = Array.from(new Set([...Object.keys(prevWeights), ...Object.keys(newW)]));
+    const smoothW: Record<string, number> = {};
+    for (const s of mergedSrcs) {
+      const a = Number(newW[s] ?? 0);
+      const b = Number(prevWeights[s] ?? 0);
+      smoothW[s] = alpha * a + (1 - alpha) * b;
+    }
+    const weightsSmoothed = normalizeWeights(smoothW);
     // Persist results
     await pool.query(
-      `INSERT INTO oracle_pred_config(chain_id, oracle_addr, heartbeat_seconds, offset_bps, decimals, scale_factor, lag_seconds, updated_at)
-       VALUES($1,$2,$3,$4, COALESCE((SELECT decimals FROM oracle_pred_config WHERE chain_id=$1 AND oracle_addr=$2), $5), COALESCE((SELECT scale_factor FROM oracle_pred_config WHERE chain_id=$1 AND oracle_addr=$2), $6), $7, now())
-       ON CONFLICT (chain_id, oracle_addr) DO UPDATE SET heartbeat_seconds=EXCLUDED.heartbeat_seconds, offset_bps=EXCLUDED.offset_bps, lag_seconds=EXCLUDED.lag_seconds, updated_at=now()`,
-      [chainId, addr, hb, offset, Number(o.decimals), String(o.scaleFactor), best.lag],
+      `INSERT INTO oracle_pred_config(chain_id, oracle_addr, heartbeat_seconds, offset_bps, bias_bps, decimals, scale_factor, lag_seconds, updated_at)
+       VALUES($1,$2,$3,$4,$5, COALESCE((SELECT decimals FROM oracle_pred_config WHERE chain_id=$1 AND oracle_addr=$2), $6), COALESCE((SELECT scale_factor FROM oracle_pred_config WHERE chain_id=$1 AND oracle_addr=$2), $7), $8, now())
+       ON CONFLICT (chain_id, oracle_addr) DO UPDATE SET heartbeat_seconds=EXCLUDED.heartbeat_seconds, offset_bps=EXCLUDED.offset_bps, bias_bps=EXCLUDED.bias_bps, lag_seconds=EXCLUDED.lag_seconds, updated_at=now()`,
+      [chainId, addr, hb, offsetSmoothed, biasSmoothed, Number(o.decimals), String(o.scaleFactor), lagSmoothed],
     );
     // Update weights table
     await pool.query('DELETE FROM oracle_cex_weights WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)', [chainId, addr]);
-    for (const [src, w] of Object.entries(best.weights as Record<string, number>)) {
+    for (const [src, w] of Object.entries(weightsSmoothed)) {
       await pool.query(
         `INSERT INTO oracle_cex_weights(chain_id, oracle_addr, source, weight) VALUES($1,$2,$3,$4)
          ON CONFLICT (chain_id, oracle_addr, source) DO UPDATE SET weight=EXCLUDED.weight, updated_at=now()`,
         [chainId, addr, src, w],
       );
     }
-    console.log(`🔧 Auto-calibrated ${addr} on ${chainId}: hb=${hb}s, offset=${offset}bps, lag=${best.lag}, weights=${JSON.stringify(best.weights)} (samples=${best.samples}, p90=${best.p90}bps)`);
+    console.log(`🔧 Auto-calibrated ${addr} on ${chainId}: hb=${hb}s, offset=${offsetSmoothed}bps, bias=${biasSmoothed}bps, lag=${lagSmoothed}, weights=${JSON.stringify(weightsSmoothed)} (samples=${best.samples}, p90=${best.p90}bps)`);
   }
 }
 
