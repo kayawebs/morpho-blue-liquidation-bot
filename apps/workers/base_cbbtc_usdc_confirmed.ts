@@ -313,30 +313,7 @@ async function main() {
     onError: () => {},
   });
 
-  // 后备扫描：定期扫描近 N 个区块防止订阅丢事件
-  async function scanRecentTransmissions() {
-    try {
-      const cur = await publicClient.getBlockNumber();
-      const from = cur > 200n ? cur - 200n : 0n;
-      const logs = await publicClient.getLogs({ address: MARKET.aggregator, event: evt, fromBlock: from, toBlock: cur } as any);
-      for (const l of logs as any[]) {
-        const key = `${l.blockNumber}:${l.transactionIndex}:${l.logIndex}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        queue.push({
-          blockNumber: l.blockNumber as bigint,
-          txIndex: Number(l.transactionIndex ?? 0),
-          logIndex: Number(l.logIndex ?? 0),
-          txHash: l.transactionHash as string | undefined,
-          blockHash: l.blockHash as string | undefined,
-        });
-        eventsReceived++;
-        if (VERBOSE) console.log(`🔎 backfill queued key=${key} queue=${queue.length}`);
-      }
-      await processMatured();
-    } catch {}
-  }
-  setInterval(scanRecentTransmissions, 15_000);
+  // 兜底回扫机制已移除：仅依赖 WS 订阅与 head 推进处理
 
   async function handleConfirmedTransmission(item?: QItem) {
     let phase = 'init';
