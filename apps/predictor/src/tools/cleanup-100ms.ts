@@ -11,7 +11,8 @@ async function main() {
     const { rowCount } = await pool.query('DELETE FROM cex_agg_100ms WHERE symbol=$1', [s]);
     console.log(`🧹 Deleted ${rowCount ?? 0} rows from cex_agg_100ms for symbol=${s}`);
   }
+  try { await pool.end(); } catch {}
+  process.exit(0);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
-
