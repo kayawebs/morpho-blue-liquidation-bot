@@ -3,10 +3,11 @@ import { loadConfig } from './config.js';
 import { insertTick } from './db.js';
 import { makeFetchWithProxy } from './utils/proxy.js';
 
-async function latestTimestampSec(symbol: string): Promise<number | undefined> {
-  const { rows } = await pool.query('SELECT EXTRACT(EPOCH FROM MAX(ts))::bigint AS t FROM cex_ticks WHERE symbol=$1', [symbol]);
-  const t = Number(rows[0]?.t);
-  return Number.isFinite(t) ? t : undefined;
+async function hasExistingData(symbol: string): Promise<boolean> {
+  const { rows: r1 } = await pool.query('SELECT 1 FROM cex_agg_100ms WHERE symbol=$1 LIMIT 1', [symbol]);
+  if (r1.length > 0) return true;
+  const { rows: r2 } = await pool.query('SELECT 1 FROM cex_ticks WHERE symbol=$1 LIMIT 1', [symbol]);
+  return r2.length > 0;
 }
 
 async function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
@@ -90,8 +91,6 @@ export async function runBackfillIfNeeded() {
     console.log('⏭️  Backfill disabled via PREDICTOR_DISABLE_BACKFILL=1');
     return;
   }
-  const nowSec = Math.floor(Date.now() / 1000);
-  const staleThresholdSec = 10 * 60; // 10 minutes
   const backfillMinutes = Number(process.env.PREDICTOR_BACKFILL_MINUTES ?? 90); // backfill N minutes of 1m candles
 
   async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
@@ -104,9 +103,10 @@ export async function runBackfillIfNeeded() {
   }
   for (const p of cfg.pairs) {
     const norm = p.symbol;
-    const latest = await latestTimestampSec(norm);
-    if (latest && nowSec - latest < staleThresholdSec) {
-      continue; // fresh enough
+    // New policy: only backfill if there is NO existing data for this symbol in DB
+    if (await hasExistingData(norm)) {
+      console.log(`↩️  Skip backfill for ${norm}: existing DB rows found`);
+      continue;
     }
     console.log(`🧩 Backfilling CEX ticks for ${norm} (~${backfillMinutes}m)…`);
     try {
