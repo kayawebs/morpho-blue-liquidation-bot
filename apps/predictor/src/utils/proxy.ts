@@ -32,6 +32,7 @@ export async function makeFetchWithProxy(): Promise<typeof fetch> {
     const u: any = await import('undici');
     const dispatcher = new u.ProxyAgent(proxyUrl);
     const f = (input: any, init: any = {}) => u.fetch(input, { ...init, dispatcher });
+    try { console.log(`🌐 Using proxy for HTTP(S) fetch: ${describeProxyUrl(proxyUrl)}`); } catch {}
     return f as unknown as typeof fetch;
   } catch {
     return globalThis.fetch.bind(globalThis);

@@ -142,6 +142,24 @@ export async function runAutoCalibrateOnce() {
     const topSources = ranked.slice(0, Math.min(3, ranked.length));
     const subsetCombos = combos(topSources).filter((c) => c.length >= 1);
     // For each lag and subset, run a fine grid over weights to minimize p90 abs error
+    // Precompute per-event per-exchange median prices at each lag to avoid repeated DB calls in weight loops
+    const lagList = lags;
+    const med: Record<string, Record<number, (number | undefined)[]>> = {};
+    for (const ex of sources) {
+      med[ex] = {} as any;
+      for (const lag of lagList) med[ex][lag] = new Array(events.length).fill(undefined);
+    }
+    for (let i = 0; i < events.length; i++) {
+      const e = events[i]!;
+      for (const ex of sources) {
+        for (const lag of lagList) {
+          const p = await fetchMedianAt(symbol, e.ts - lag, ex);
+          med[ex][lag]![i] = p;
+        }
+      }
+      if ((i + 1) % 50 === 0) console.log(`🔬 precompute medians: ${i + 1}/${events.length}`);
+    }
+
     let best: any = undefined;
     for (const lag of lags) {
       for (const sub of subsetCombos) {
@@ -149,23 +167,15 @@ export async function runAutoCalibrateOnce() {
         for (const w of weightList) {
           const errsAbs: number[] = [];
           const errsSigned: number[] = [];
-          for (const e of events) {
-            const t = e.ts - lag;
-            let num = 0, den = 0;
-            let ok = true;
-            for (const ex of sub) {
-              const p = await fetchMedianAt(symbol, t, ex);
-              if (p === undefined) { ok = false; break; }
-              const ww = w[ex] ?? 0;
-              num += p * ww;
-              den += ww;
-            }
+          for (let i = 0; i < events.length; i++) {
+            let num = 0, den = 0; let ok = true;
+            for (const ex of sub) { const p = med[ex][lag]![i]!; if (p === undefined) { ok = false; break; } const ww = w[ex] ?? 0; num += p * ww; den += ww; }
             if (!ok || den <= 0) continue;
             const pred = num / den;
             if (!(pred > 0)) continue;
             const { rows } = await pool.query(
               `SELECT answer FROM oracle_pred_samples WHERE chain_id=$1 AND lower(oracle_addr)=lower($2) AND event_ts=to_timestamp($3) LIMIT 1`,
-              [chainId, addr, e.ts],
+              [chainId, addr, events[i]!.ts],
             );
             const onchain = Number(rows[0]?.answer);
             if (!Number.isFinite(onchain)) continue;
@@ -182,6 +192,7 @@ export async function runAutoCalibrateOnce() {
           const cand = { lag, sources: sub, weights: w, samples: errsAbs.length, p50, p90, bias };
           if (!best || p90 < best.p90 || (p90 === best.p90 && p50 < best.p50)) best = cand;
         }
+        console.log(`🧪 evaluated subset=${sub.join('+')} lag=${lag} best_p90=${best?.p90}`);
       }
     }
     if (!best) continue;

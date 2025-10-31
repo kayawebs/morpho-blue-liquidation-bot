@@ -115,7 +115,7 @@ export async function runStartupFit() {
           used++;
           if (used % 10 === 0) await sleep(5);
         }
-        if (errs.length < Math.max(10, Math.floor(samples.length * 0.4)))) continue;
+        if (errs.length < Math.max(10, Math.floor(samples.length * 0.4))) continue;
         const q = percentiles(errs, [0.5, 0.9]);
         const cand = { lagMs, p50: q[0.5]!, p90: q[0.9]!, used };
         if (!best || cand.p90 < best.p90 || (cand.p90 === best.p90 && cand.p50 < best.p50)) best = cand;

@@ -272,48 +272,60 @@ async function main() {
 
   const VERBOSE = process.env.WORKER_VERBOSE === '1';
 
-  // 订阅 OCR2 NewTransmission（确认后处理）
+  // 订阅 OCR2 NewTransmission（确认后处理） + 自愈重连
   const evt = getAbiItem({ abi: OCR2_NEW_TRANSMISSION as any, name: "NewTransmission" }) as any;
-  publicClient.watchEvent({
-    address: MARKET.aggregator,
-    event: evt,
-    onLogs: (logs: any[]) => {
-      for (const l of logs) {
-        const key = `${l.blockNumber}:${l.transactionIndex}:${l.logIndex}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        queue.push({
-          blockNumber: l.blockNumber as bigint,
-          txIndex: Number(l.transactionIndex ?? 0),
-          logIndex: Number(l.logIndex ?? 0),
-          txHash: l.transactionHash as string | undefined,
-          blockHash: l.blockHash as string | undefined,
-        });
-        eventsReceived++;
-        if (VERBOSE) console.log(`🛰 onLogs queued key=${key} queue=${queue.length}`);
-        // 记录审计：尽量带上 roundId/answer（从解码参数，若可用）
-        try {
-          const args: any = (l as any).args ?? {};
-          pushAudit({
-            ts: nowIso(),
-            status: 'queued',
-            block: (l.blockNumber as bigint)?.toString?.(),
-            tx: l.transactionHash as string | undefined,
-            roundId: (args?.aggregatorRoundId as any)?.toString?.() ?? String(args?.aggregatorRoundId ?? ''),
-            answerRaw: (args?.answer as any)?.toString?.(),
+  let unwatchEvent: (() => void) | undefined;
+  let unwatchBlocks: (() => void) | undefined;
+  let lastHeadAt = Date.now();
+  let lastEventAt = 0;
+
+  function startEventWatch() {
+    unwatchEvent = publicClient.watchEvent({
+      address: MARKET.aggregator,
+      event: evt,
+      onLogs: (logs: any[]) => {
+        for (const l of logs) {
+          const key = `${l.blockNumber}:${l.transactionIndex}:${l.logIndex}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          queue.push({
+            blockNumber: l.blockNumber as bigint,
+            txIndex: Number(l.transactionIndex ?? 0),
+            logIndex: Number(l.logIndex ?? 0),
+            txHash: l.transactionHash as string | undefined,
+            blockHash: l.blockHash as string | undefined,
           });
-        } catch {}
-      }
-      // 稳定排序：按区块/交易/日志索引
-      queue.sort((a, b) =>
-        a.blockNumber === b.blockNumber
-          ? a.txIndex === b.txIndex
-            ? a.logIndex - b.logIndex
-            : a.txIndex - b.txIndex
-          : Number(a.blockNumber - b.blockNumber),
-      );
-    },
-  } as any);
+          eventsReceived++;
+          if (VERBOSE) console.log(`🛰 onLogs queued key=${key} queue=${queue.length}`);
+          // 记录审计：尽量带上 roundId/answer（从解码参数，若可用）
+          try {
+            const args: any = (l as any).args ?? {};
+            pushAudit({
+              ts: nowIso(),
+              status: 'queued',
+              block: (l.blockNumber as bigint)?.toString?.(),
+              tx: l.transactionHash as string | undefined,
+              roundId: (args?.aggregatorRoundId as any)?.toString?.() ?? String(args?.aggregatorRoundId ?? ''),
+              answerRaw: (args?.answer as any)?.toString?.(),
+            });
+          } catch {}
+          lastEventAt = Date.now();
+        }
+        // 稳定排序：按区块/交易/日志索引
+        queue.sort((a, b) =>
+          a.blockNumber === b.blockNumber
+            ? a.txIndex === b.txIndex
+              ? a.logIndex - b.logIndex
+              : a.txIndex - b.txIndex
+            : Number(a.blockNumber - b.blockNumber),
+        );
+      },
+      onError: (err: any) => {
+        console.warn('⚠️ event subscription error:', err?.message ?? String(err));
+        scheduleRebuild();
+      },
+    } as any);
+  }
 
   // 使用 watchBlocks 在新区块到来时立即推进确认并处理队列（比轮询更快）
   async function processMatured() {
@@ -337,10 +349,11 @@ async function main() {
       eventsProcessed++;
     }
   }
-  publicClient.watchBlocks({
-    emitMissed: true,
-    includeTransactions: false,
-    onBlock: async (blk: any) => {
+  function startBlockWatch() {
+    unwatchBlocks = publicClient.watchBlocks({
+      emitMissed: true,
+      includeTransactions: false,
+      onBlock: async (blk: any) => {
       try {
         if (!blk || typeof blk.number === 'undefined') {
           const n = await publicClient.getBlockNumber();
@@ -348,11 +361,51 @@ async function main() {
         } else {
           head = blk.number as bigint;
         }
+        lastHeadAt = Date.now();
         await processMatured();
       } catch {}
-    },
-    onError: () => {},
-  });
+      },
+      onError: (err: any) => {
+        console.warn('⚠️ block subscription error:', err?.message ?? String(err));
+        scheduleRebuild();
+      },
+    });
+  }
+
+  function stopWatches() {
+    try { unwatchEvent?.(); } catch {}
+    try { unwatchBlocks?.(); } catch {}
+    unwatchEvent = undefined; unwatchBlocks = undefined;
+  }
+
+  let rebuilding = false;
+  function scheduleRebuild() {
+    if (rebuilding) return;
+    rebuilding = true;
+    setTimeout(() => {
+      try {
+        stopWatches();
+        startEventWatch();
+        startBlockWatch();
+        console.log('🔄 Rebuilt subscriptions');
+      } finally {
+        rebuilding = false;
+      }
+    }, 1000);
+  }
+
+  startEventWatch();
+  startBlockWatch();
+
+  // Liveness check: if neither head nor events advance for a while, rebuild subscriptions
+  const LIVENESS_MS = 60_000;
+  setInterval(() => {
+    const last = Math.max(lastHeadAt, lastEventAt);
+    if (Date.now() - last > LIVENESS_MS) {
+      console.warn('⚠️ liveness stale, rebuilding subscriptions');
+      scheduleRebuild();
+    }
+  }, 20_000);
 
   // 兜底回扫机制已移除：仅依赖 WS 订阅与 head 推进处理
 

@@ -86,9 +86,22 @@ async function expandAndInsert(source: string, normSymbol: string, candles: Cand
 export async function runBackfillIfNeeded() {
   const cfg = loadConfig();
   const fetchImpl = await makeFetchWithProxy();
+  if (process.env.PREDICTOR_DISABLE_BACKFILL === '1') {
+    console.log('⏭️  Backfill disabled via PREDICTOR_DISABLE_BACKFILL=1');
+    return;
+  }
   const nowSec = Math.floor(Date.now() / 1000);
   const staleThresholdSec = 10 * 60; // 10 minutes
-  const backfillMinutes = 90; // backfill 90 minutes of 1m candles
+  const backfillMinutes = Number(process.env.PREDICTOR_BACKFILL_MINUTES ?? 90); // backfill N minutes of 1m candles
+
+  async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    let lastErr: any;
+    const delays = [500, 1200, 2500];
+    for (let i = 0; i < delays.length; i++) {
+      try { return await fn(); } catch (e) { lastErr = e; await sleep(delays[i]!); }
+    }
+    throw Object.assign(new Error(`${label} failed: ${(lastErr as any)?.message ?? lastErr}`), { cause: lastErr });
+  }
   for (const p of cfg.pairs) {
     const norm = p.symbol;
     const latest = await latestTimestampSec(norm);
@@ -98,24 +111,25 @@ export async function runBackfillIfNeeded() {
     console.log(`🧩 Backfilling CEX ticks for ${norm} (~${backfillMinutes}m)…`);
     try {
       if (p.binance) {
-        const candles = await fetchBinanceCandles(fetchImpl, p.binance, backfillMinutes);
+        const candles = await withRetry(`binance klines ${p.binance}`, () => fetchBinanceCandles(fetchImpl, p.binance, backfillMinutes));
         await expandAndInsert('binance', norm, candles);
         await sleep(200);
       }
       if (p.okx) {
-        const candles = await fetchOkxCandles(fetchImpl, p.okx, backfillMinutes);
+        const candles = await withRetry(`okx candles ${p.okx}`, () => fetchOkxCandles(fetchImpl, p.okx, backfillMinutes));
         await expandAndInsert('okx', norm, candles);
         await sleep(200);
       }
       if (p.coinbase) {
-        const candles = await fetchCoinbaseCandles(fetchImpl, p.coinbase, backfillMinutes);
+        const candles = await withRetry(`coinbase candles ${p.coinbase}`, () => fetchCoinbaseCandles(fetchImpl, p.coinbase, backfillMinutes));
         await expandAndInsert('coinbase', norm, candles);
         await sleep(200);
       }
       console.log(`✅ Backfill complete for ${norm}`);
     } catch (e) {
-      console.warn(`⚠️ Backfill failed for ${norm}: ${(e as Error).message}`);
+      const err: any = e;
+      console.warn(`⚠️ Backfill failed for ${norm}: ${err?.message ?? err}`);
+      if (err?.cause) console.warn(`   cause: ${err.cause?.message ?? String(err.cause)}`);
     }
   }
 }
-
