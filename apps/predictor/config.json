@@ -9,7 +9,7 @@
     }
   ],
   "aggregator": {
-    "windowMs": 3000,
+    "windowMs": 800,
     "trimRatio": 0.2,
     "minExchanges": 1,
     "weights": {

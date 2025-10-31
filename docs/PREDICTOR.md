@@ -22,6 +22,12 @@
 - Auto calibrate (periodic): in fixed lag, fit exchange weights and signed bias; compute heartbeat from gaps; EWMA-smooth and persist.
 - 100ms aggregation: near-window in-memory cache prioritized; DB fallback; TTL cleanup (default 7d).
 
+### Tuning windowMs
+- `aggregator.windowMs` controls near-window fusion lag vs. robustness. Recommended 600–1000ms (default 800).
+- After changing `windowMs`, clean old 100ms rows to avoid mixing regimes:
+  - `pnpm -C apps/predictor cleanup:100ms`
+  - Then restart predictor and re-run calibrate after collecting fresh samples.
+
 ## Validate accuracy
 - Command: `pnpm -C apps/predictor validate:accuracy`
 - Output includes thresholds (offset/heartbeat/lagMs), value error p50/p90, and offset-detection lead time.
@@ -29,4 +35,3 @@
 ## Notes
 - Proxy (optional): set `HTTPS_PROXY/HTTP_PROXY/ALL_PROXY` and `PREDICTOR_WS_DIRECT=1` for WS.
 - Tuning: `apps/predictor/config.json` → `aggregator.windowMs` (500–1000), `aggregator.binMs` (100).
-
