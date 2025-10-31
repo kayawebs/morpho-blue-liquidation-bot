@@ -15,14 +15,16 @@ function percentile(nums: number[], p: number): number | undefined {
   return arr[idx];
 }
 
-async function fetchEvents(chainId: number, oracle: string, limit = 1000): Promise<{ ts: number }[]> {
+async function fetchEvents(chainId: number, oracle: string, limit = 1000): Promise<{ ts: number; onchain: number }[]> {
   const { rows } = await pool.query(
-    `SELECT extract(epoch from event_ts)::bigint AS ts
+    `SELECT extract(epoch from event_ts)::bigint AS ts, answer::float AS onchain
      FROM oracle_pred_samples WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)
      AND event_ts IS NOT NULL ORDER BY event_ts DESC LIMIT $3`,
     [chainId, oracle, limit],
   );
-  return rows.map((r) => ({ ts: Number(r.ts) })).filter((x) => Number.isFinite(x.ts));
+  return rows
+    .map((r) => ({ ts: Number(r.ts), onchain: Number(r.onchain) }))
+    .filter((x) => Number.isFinite(x.ts) && Number.isFinite(x.onchain) && x.onchain > 0);
 }
 
 async function fetchMedianAt(symbol: string, tsSec: number, source?: string): Promise<number | undefined> {
@@ -112,10 +114,47 @@ export async function runAutoCalibrateOnce() {
     for (let i = 1; i < ts.length; i++) gaps.push(ts[i]! - ts[i - 1]!);
     // Heartbeat: if feed-specified present, respect it; else compute
     const hb = Number.isFinite(feedHb) ? feedHb : Math.max(10, Math.round(median(gaps) ?? 60));
-    // Candidate lags: include previous around ±1s plus coarse
-    const lagSet = new Set<number>([0,1,2,3,5,7,10]);
-    if (prevCfg && Number.isFinite(prevCfg.lag)) { lagSet.add(prevCfg.lag); lagSet.add(prevCfg.lag + 1); if (prevCfg.lag > 0) lagSet.add(prevCfg.lag - 1); }
-    const lags = Array.from(lagSet.values()).sort((a,b)=>a-b);
+    // Fine lag search (ms) around previous lag using 100ms aggregated price
+    async function priceAt100ms(symbol: string, tsMs: number): Promise<number | undefined> {
+      const t = Math.floor(tsMs);
+      const { rows } = await pool.query(
+        `SELECT price FROM cex_agg_100ms WHERE symbol=$1 AND ts_ms <= $2 ORDER BY ts_ms DESC LIMIT 1`,
+        [symbol, t],
+      );
+      if (rows.length > 0) return Number(rows[0].price);
+      const { rows: rows2 } = await pool.query(
+        `SELECT price FROM cex_agg_100ms WHERE symbol=$1 AND ts_ms BETWEEN $2 AND $3 ORDER BY ABS(ts_ms - $2) ASC LIMIT 1`,
+        [symbol, t, t + 300],
+      );
+      if (rows2.length > 0) return Number(rows2[0].price);
+      return undefined;
+    }
+    const centerMs = Number.isFinite(prevCfg?.lagMs) && (prevCfg!.lagMs > 0) ? prevCfg!.lagMs : (Number.isFinite(prevCfg?.lag) ? prevCfg!.lag * 1000 : 1500);
+    const lagMsList: number[] = [];
+    for (let ms = Math.max(0, centerMs - 1500); ms <= Math.min(5000, centerMs + 1500); ms += 100) lagMsList.push(ms);
+    if (lagMsList.length === 0) for (let ms = 0; ms <= 3000; ms += 100) lagMsList.push(ms);
+    let bestLag: { lagMs: number; p50: number; p90: number; used: number } | undefined;
+    for (const lagMs of lagMsList) {
+      const errs: number[] = [];
+      let used = 0;
+      for (const e of events) {
+        const p = await priceAt100ms(symbol, e.ts * 1000 - lagMs);
+        if (!(p && p > 0)) continue;
+        const ratio = e.onchain / p;
+        if (!Number.isFinite(ratio)) continue;
+        const ebps = Math.round((ratio - 1) * 10_000);
+        errs.push(Math.abs(ebps));
+        used++;
+      }
+      if (errs.length < Math.max(10, Math.floor(events.length * 0.25))) continue;
+      const p50 = median(errs) ?? Infinity;
+      const p90 = percentile(errs, 0.9) ?? Infinity;
+      const cand = { lagMs, p50, p90, used };
+      if (!bestLag || p90 < bestLag.p90 || (p90 === bestLag.p90 && p50 < bestLag.p50)) bestLag = cand;
+    }
+    if (!bestLag) { console.warn('auto-calibrate: no bestLag found'); continue; }
+    const lagRawSec = Math.round(bestLag.lagMs / 1000);
+    const lags = [lagRawSec];
     // Precompute per-event per-exchange prices at each lag to reduce repeated queries
     const sources = sourcesAll.slice();
     // Evaluate per-exchange individual errors to rank sources
@@ -125,11 +164,7 @@ export async function runAutoCalibrateOnce() {
       for (const e of events) {
         const p = await fetchMedianAt(symbol, e.ts - (prevCfg?.lag ?? 0), ex);
         if (p === undefined) continue;
-        const { rows } = await pool.query(
-          `SELECT answer FROM oracle_pred_samples WHERE chain_id=$1 AND lower(oracle_addr)=lower($2) AND event_ts=to_timestamp($3) LIMIT 1`,
-          [chainId, addr, e.ts],
-        );
-        const onchain = Number(rows[0]?.answer);
+          const onchain = e.onchain;
         if (!Number.isFinite(onchain) || !(p > 0)) continue;
         const ratio = onchain / p;
         if (!Number.isFinite(ratio)) continue;
@@ -199,10 +234,10 @@ export async function runAutoCalibrateOnce() {
     // Offset: if feed-specified present, respect it; else compute from residual p90 with floor
     const offsetRaw = Number.isFinite(feedOffset) ? feedOffset : Math.max(5, Math.round(best.p90));
     const biasRaw = Math.round(Number(best.bias ?? 0));
-    const lagRaw = Number(best.lag);
+    const lagRaw = lagRawSec;
     // EWMA smoothing against previous config
     const lagSmoothed = prevCfg ? Math.round(alpha * lagRaw + (1 - alpha) * prevCfg.lag) : lagRaw;
-    const lagSmoothedMs = prevCfg ? Math.round(alpha * (lagRaw * 1000) + (1 - alpha) * (prevCfg.lagMs || prevCfg.lag * 1000)) : (lagRaw * 1000);
+    const lagSmoothedMs = prevCfg ? Math.round(alpha * bestLag.lagMs + (1 - alpha) * (prevCfg.lagMs || prevCfg.lag * 1000)) : bestLag.lagMs;
     const offsetSmoothed = prevCfg && !Number.isFinite(feedOffset)
       ? Math.round(alpha * offsetRaw + (1 - alpha) * prevCfg.offset)
       : offsetRaw;
@@ -233,7 +268,7 @@ export async function runAutoCalibrateOnce() {
         [chainId, addr, src, w],
       );
     }
-    console.log(`🔧 Auto-calibrated ${addr} on ${chainId}: hb=${hb}s, offset=${offsetSmoothed}bps, bias=${biasSmoothed}bps, lag=${lagSmoothed}, weights=${JSON.stringify(weightsSmoothed)} (samples=${best.samples}, p90=${best.p90}bps)`);
+    console.log(`🔧 Auto-calibrated ${addr} on ${chainId}: hb=${hb}s, offset=${offsetSmoothed}bps, bias=${biasSmoothed}bps, lag=${lagSmoothed} (lagMs=${lagSmoothedMs}), weights=${JSON.stringify(weightsSmoothed)} (lagFitMs=${bestLag.lagMs}, samples=${best.samples}, p90=${best.p90}bps)`);
   }
 }
 
