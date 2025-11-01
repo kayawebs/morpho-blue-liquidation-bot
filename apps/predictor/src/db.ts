@@ -146,6 +146,60 @@ export function insertAgg100ms(symbol: string, tsMs: number, price: number) {
   agg100Batch.push({ symbol, tsMs, price });
 }
 
+// Per-source 100ms aggregated prices (for weight fit & historical enrich)
+// Schema: symbol, source, ts_ms, price
+// Upsert on (symbol, source, ts_ms)
+export async function initSrcAgg100ms() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cex_src_100ms (
+      symbol TEXT NOT NULL,
+      source TEXT NOT NULL,
+      ts_ms BIGINT NOT NULL,
+      price DOUBLE PRECISION NOT NULL,
+      PRIMARY KEY (symbol, source, ts_ms)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cex_src_100ms_symbol_source_ts ON cex_src_100ms(symbol, source, ts_ms DESC);
+  `);
+}
+
+const srcAggBatch: { symbol: string; source: string; tsMs: number; price: number }[] = [];
+let srcAggFlushing = false;
+setInterval(async () => {
+  if (srcAggFlushing || srcAggBatch.length === 0) return;
+  srcAggFlushing = true;
+  const items = srcAggBatch.splice(0, srcAggBatch.length);
+  const values: string[] = [];
+  const params: any[] = [];
+  let i = 1;
+  for (const it of items) {
+    values.push(`($${i++}, $${i++}, $${i++}, $${i++})`);
+    params.push(it.symbol, it.source, Math.floor(it.tsMs), it.price);
+  }
+  try {
+    await pool.query(
+      `INSERT INTO cex_src_100ms(symbol, source, ts_ms, price) VALUES ${values.join(',')}
+       ON CONFLICT (symbol, source, ts_ms) DO UPDATE SET price=EXCLUDED.price`,
+      params,
+    );
+  } catch (e) {
+    for (const it of items) {
+      try {
+        await pool.query(
+          `INSERT INTO cex_src_100ms(symbol, source, ts_ms, price) VALUES ($1,$2,$3,$4)
+           ON CONFLICT (symbol, source, ts_ms) DO UPDATE SET price=EXCLUDED.price`,
+          [it.symbol, it.source, Math.floor(it.tsMs), it.price],
+        );
+      } catch {}
+    }
+  } finally {
+    srcAggFlushing = false;
+  }
+}, 1000);
+
+export function insertSrcAgg100ms(symbol: string, source: string, tsMs: number, price: number) {
+  srcAggBatch.push({ symbol, source, tsMs, price });
+}
+
 // TTL cleanup for 100ms table (default keep 7 days)
 let ttlDays = 7;
 try { const v = Number(process.env.PREDICTOR_100MS_TTL_DAYS); if (Number.isFinite(v) && v > 0) ttlDays = Math.floor(v); } catch {}

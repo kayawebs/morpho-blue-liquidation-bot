@@ -129,6 +129,21 @@ export async function runAutoCalibrateOnce() {
       if (rows2.length > 0) return Number(rows2[0].price);
       return undefined;
     }
+
+    async function priceAt100msBySource(symbol: string, source: string, tsMs: number): Promise<number | undefined> {
+      const t = Math.floor(tsMs);
+      const { rows } = await pool.query(
+        `SELECT price FROM cex_src_100ms WHERE symbol=$1 AND source=$2 AND ts_ms <= $3 ORDER BY ts_ms DESC LIMIT 1`,
+        [symbol, source.toLowerCase(), t],
+      );
+      if (rows.length > 0) return Number(rows[0].price);
+      const { rows: rows2 } = await pool.query(
+        `SELECT price FROM cex_src_100ms WHERE symbol=$1 AND source=$2 AND ts_ms BETWEEN $3 AND $4 ORDER BY ABS(ts_ms - $3) ASC LIMIT 1`,
+        [symbol, source.toLowerCase(), t, t + 300],
+      );
+      if (rows2.length > 0) return Number(rows2[0].price);
+      return undefined;
+    }
     const centerMs = Number.isFinite(prevCfg?.lagMs) && (prevCfg!.lagMs > 0) ? prevCfg!.lagMs : (Number.isFinite(prevCfg?.lag) ? prevCfg!.lag * 1000 : 1500);
     const lagMsList: number[] = [];
     for (let ms = Math.max(0, centerMs - 1500); ms <= Math.min(5000, centerMs + 1500); ms += 100) lagMsList.push(ms);
@@ -155,7 +170,6 @@ export async function runAutoCalibrateOnce() {
     if (!bestLag) { console.warn('auto-calibrate: no bestLag found'); continue; }
     const lagRawSec = Math.round(bestLag.lagMs / 1000);
     const lags = [lagRawSec];
-    // Precompute per-event per-exchange prices at each lag to reduce repeated queries
     const sources = sourcesAll.slice();
     // Evaluate per-exchange individual errors to rank sources
     const perExErrP90: Record<string, number> = {};
@@ -188,7 +202,7 @@ export async function runAutoCalibrateOnce() {
       const e = events[i]!;
       for (const ex of sources) {
         for (const lag of lagList) {
-          const p = await fetchMedianAt(symbol, e.ts - lag, ex);
+          const p = await priceAt100msBySource(symbol, ex, (e.ts - lag) * 1000);
           med[ex][lag]![i] = p;
         }
       }

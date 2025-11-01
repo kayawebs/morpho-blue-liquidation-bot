@@ -17,6 +17,12 @@
   - `GET /oracles/:chainId/:addr/predictionAt?tsMs=...&lagMs=...`
   - If `lag/lagMs` omitted, defaults to DB `lag_ms` (falls back to `lag_seconds*1000`).
 
+## Historical 100ms enrich (per exchange)
+- Fill 100ms gaps around transmit events by aggregating CEX trades in small windows:
+  - `pnpm -C apps/predictor enrich:events --chain 8453 --oracle 0x852a... --limit 100 --window 120`
+  - Writes per-exchange 100ms (`cex_src_100ms`) and merged 100ms (`cex_agg_100ms`).
+  - Use after cleanup or cold starts to make lag/weight fit purely 100ms-based.
+
 ## Fitting logic (short)
 - Startup fit (ms): scan `lagMs ∈ [0,3000]` every 100ms using 100ms aggregated price, pick p90/p50 error minimum → persist `lag_ms` and `lag_seconds`.
 - Auto calibrate (periodic): in fixed lag, fit exchange weights and signed bias; compute heartbeat from gaps; EWMA-smooth and persist.

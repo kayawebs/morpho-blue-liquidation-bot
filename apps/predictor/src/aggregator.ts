@@ -60,6 +60,24 @@ export class PriceAggregator {
     return { price, count: entries.length, sources: sourcePrice };
   }
 
+  // Return current per-source medians within the window (no trimming/merge)
+  perSourceMedians(symbol: string): Record<string, number> {
+    const now = Date.now();
+    const ticks = (this.book.get(symbol) ?? []).filter((t) => t.ts >= now - this.windowMs);
+    const bySource = new Map<string, number[]>();
+    for (const t of ticks) {
+      const key = t.source.toLowerCase();
+      if (!bySource.has(key)) bySource.set(key, []);
+      bySource.get(key)!.push(t.price);
+    }
+    const out: Record<string, number> = {};
+    for (const [src, arr] of bySource) {
+      const m = this.median(arr);
+      if (m !== undefined) out[src] = m;
+    }
+    return out;
+  }
+
   stats(symbol: string) {
     const arr = this.book.get(symbol) ?? [];
     const ag = this.aggregated(symbol);
