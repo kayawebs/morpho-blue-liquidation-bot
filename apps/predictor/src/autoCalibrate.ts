@@ -1,5 +1,7 @@
 import { pool } from './db.js';
 import { loadConfig } from './config.js';
+import { enrichEventsAt } from './enrich.js';
+import { makeFetchWithProxy } from './utils/proxy.js';
 
 function median(nums: number[]): number | undefined {
   if (nums.length === 0) return undefined;
@@ -109,7 +111,10 @@ export async function runAutoCalibrateOnce() {
     const alpha = 0.3; // EWMA smoothing factor
     // Heartbeat from event gaps
     const events = await fetchEvents(chainId, addr, 2000);
-    const ts = events.map((e) => e.ts).sort((a, b) => a - b);
+    const MAX_FIT_EVENTS = 120; // 固定最近事件窗口
+    const fitEvents = events.slice(-MAX_FIT_EVENTS);
+    console.log(`📊 calibrate using ${fitEvents.length}/${events.length} recent events for ${addr}`);
+    const ts = fitEvents.map((e) => e.ts).sort((a, b) => a - b);
     const gaps: number[] = [];
     for (let i = 1; i < ts.length; i++) gaps.push(ts[i]! - ts[i - 1]!);
     // Heartbeat: if feed-specified present, respect it; else compute
@@ -148,11 +153,25 @@ export async function runAutoCalibrateOnce() {
     const lagMsList: number[] = [];
     for (let ms = Math.max(0, centerMs - 1500); ms <= Math.min(5000, centerMs + 1500); ms += 100) lagMsList.push(ms);
     if (lagMsList.length === 0) for (let ms = 0; ms <= 3000; ms += 100) lagMsList.push(ms);
+    // Intelligent coverage: ensure 100ms points exist near t_event - lagGuess for recent events
+    const lagGuess = Number.isFinite(prevCfg?.lagMs) && (prevCfg!.lagMs > 0) ? prevCfg!.lagMs : (Number.isFinite(prevCfg?.lag) ? prevCfg!.lag * 1000 : 1500);
+    const checkWindowMs = 300;
+    const gapTs: number[] = [];
+    for (const e of fitEvents) {
+      const t = e.ts * 1000 - lagGuess;
+      const { rows: r1 } = await pool.query(`SELECT 1 FROM cex_agg_100ms WHERE symbol=$1 AND ts_ms BETWEEN $2 AND $3 LIMIT 1`, [symbol, Math.floor(t - checkWindowMs), Math.floor(t + checkWindowMs)]);
+      const { rows: r2 } = await pool.query(`SELECT 1 FROM cex_src_100ms WHERE symbol=$1 AND ts_ms BETWEEN $2 AND $3 LIMIT 1`, [symbol, Math.floor(t - checkWindowMs), Math.floor(t + checkWindowMs)]);
+      if (r1.length === 0 || r2.length === 0) gapTs.push(e.ts);
+    }
+    if (gapTs.length > 0) {
+      try { const f = await makeFetchWithProxy(); await enrichEventsAt(chainId, addr, gapTs, 120, 10, f); } catch (e) { console.warn('coverage enrich failed:', e); }
+    }
+
     let bestLag: { lagMs: number; p50: number; p90: number; used: number } | undefined;
     for (const lagMs of lagMsList) {
       const errs: number[] = [];
       let used = 0;
-      for (const e of events) {
+      for (const e of fitEvents) {
         const p = await priceAt100ms(symbol, e.ts * 1000 - lagMs);
         if (!(p && p > 0)) continue;
         const ratio = e.onchain / p;
@@ -161,7 +180,10 @@ export async function runAutoCalibrateOnce() {
         errs.push(Math.abs(ebps));
         used++;
       }
-      if (errs.length < Math.max(10, Math.floor(events.length * 0.25))) continue;
+      {
+      const required = Math.max(10, Math.floor(fitEvents.length * 0.25));
+      if (errs.length < required) { console.warn(`lagMs ${lagMs}: have ${errs.length} < required ${required}`); continue; }
+      }
       const p50 = median(errs) ?? Infinity;
       const p90 = percentile(errs, 0.9) ?? Infinity;
       const cand = { lagMs, p50, p90, used };
@@ -175,7 +197,7 @@ export async function runAutoCalibrateOnce() {
     const perExErrP90: Record<string, number> = {};
     for (const ex of sources) {
       const errs: number[] = [];
-      for (const e of events) {
+      for (const e of fitEvents) {
         const p = await fetchMedianAt(symbol, e.ts - (prevCfg?.lag ?? 0), ex);
         if (p === undefined) continue;
           const onchain = e.onchain;
@@ -196,17 +218,17 @@ export async function runAutoCalibrateOnce() {
     const med: Record<string, Record<number, (number | undefined)[]>> = {};
     for (const ex of sources) {
       med[ex] = {} as any;
-      for (const lag of lagList) med[ex][lag] = new Array(events.length).fill(undefined);
+      for (const lag of lagList) med[ex][lag] = new Array(fitEvents.length).fill(undefined);
     }
-    for (let i = 0; i < events.length; i++) {
-      const e = events[i]!;
+    for (let i = 0; i < fitEvents.length; i++) {
+      const e = fitEvents[i]!;
       for (const ex of sources) {
         for (const lag of lagList) {
           const p = await priceAt100msBySource(symbol, ex, (e.ts - lag) * 1000);
           med[ex][lag]![i] = p;
         }
       }
-      if ((i + 1) % 50 === 0) console.log(`🔬 precompute medians: ${i + 1}/${events.length}`);
+      if ((i + 1) % 50 === 0) console.log(`🔬 precompute medians: ${i + 1}/${fitEvents.length}`);
     }
 
     let best: any = undefined;
@@ -216,17 +238,13 @@ export async function runAutoCalibrateOnce() {
         for (const w of weightList) {
           const errsAbs: number[] = [];
           const errsSigned: number[] = [];
-          for (let i = 0; i < events.length; i++) {
+          for (let i = 0; i < fitEvents.length; i++) {
             let num = 0, den = 0; let ok = true;
             for (const ex of sub) { const p = med[ex][lag]![i]!; if (p === undefined) { ok = false; break; } const ww = w[ex] ?? 0; num += p * ww; den += ww; }
             if (!ok || den <= 0) continue;
             const pred = num / den;
             if (!(pred > 0)) continue;
-            const { rows } = await pool.query(
-              `SELECT answer FROM oracle_pred_samples WHERE chain_id=$1 AND lower(oracle_addr)=lower($2) AND event_ts=to_timestamp($3) LIMIT 1`,
-              [chainId, addr, events[i]!.ts],
-            );
-            const onchain = Number(rows[0]?.answer);
+            const onchain = fitEvents[i]!.onchain;
             if (!Number.isFinite(onchain)) continue;
             const ratio = onchain / pred;
             if (!Number.isFinite(ratio)) continue;
@@ -286,10 +304,35 @@ export async function runAutoCalibrateOnce() {
   }
 }
 
-export function startAutoCalibrateScheduler(intervalMs = 15 * 60_000) {
-  const run = async () => {
-    try { await runAutoCalibrateOnce(); } catch (e) { console.warn('auto-calibrate failed', e); }
-    setTimeout(run, intervalMs);
-  };
-  run();
+export function startAutoCalibrateScheduler() {
+  const MIN_INTERVAL_MS = 15 * 60_000; // 15分钟
+  const MIN_NEW_EVENTS = 3; // 至少新增3条事件再触发
+  const CHECK_MS = 60_000; // 每分钟检查一次
+  let lastCal = 0;
+  let lastCounts = new Map<string, number>();
+  async function getCounts() {
+    const { rows } = await pool.query(
+      `SELECT chain_id, oracle_addr, COUNT(*)::int AS n FROM oracle_pred_samples GROUP BY chain_id, oracle_addr`
+    );
+    const m = new Map<string, number>();
+    for (const r of rows) m.set(`${r.chain_id}:${String(r.oracle_addr).toLowerCase()}`, Number(r.n));
+    return m;
+  }
+  async function tick() {
+    try {
+      const now = Date.now();
+      const cur = await getCounts();
+      if (lastCal === 0) { lastCal = now; lastCounts = cur; return; }
+      let delta = 0;
+      for (const [k, v] of cur) delta += Math.max(0, v - (lastCounts.get(k) ?? 0));
+      const due = now - lastCal >= MIN_INTERVAL_MS;
+      if (due && delta >= MIN_NEW_EVENTS) {
+        console.log(`🛠️ auto-calibrate trigger: newEvents=${delta} since last run`);
+        try { await runAutoCalibrateOnce(); } catch (e) { console.warn('auto-calibrate failed', e); }
+        lastCal = Date.now();
+        lastCounts = cur;
+      }
+    } catch (e) { /* noop */ }
+  }
+  setInterval(tick, CHECK_MS);
 }

@@ -15,7 +15,8 @@
     "test:ws": "tsx src/tools/test-ws.ts",
     "validate:accuracy": "tsx src/tools/validate-accuracy.ts",
     "cleanup:100ms": "tsx src/tools/cleanup-100ms.ts",
-    "enrich:events": "tsx src/tools/enrich-events.ts"
+    "enrich:events": "tsx src/tools/enrich-events.ts",
+    "check:coverage": "tsx src/tools/check-coverage.ts"
   },
   "dependencies": {
     "pg": "^8.12.0",

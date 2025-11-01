@@ -8,11 +8,11 @@ import { HttpPollConnector } from './connectors/httpPoll.js';
 import { buildApp } from './service.js';
 import { serve } from '@hono/node-server';
 import { loadConfig } from './config.js';
-import { runBackfillIfNeeded } from './backfill.js';
+// import { runBackfillIfNeeded } from './backfill.js';
 import { startOracleWatcher } from './oracleWatcher.js';
-import { startAutoCalibrateScheduler } from './autoCalibrate.js';
+import { startAutoCalibrateScheduler, runAutoCalibrateOnce } from './autoCalibrate.js';
 import { seedOracleThresholdsFromConfig } from './seedThresholds.js';
-import { runStartupFit } from './startupFit.js';
+// import { runStartupFit } from './startupFit.js';
 import { enrichEvents } from './enrich.js';
 import { makeFetchWithProxy } from './utils/proxy.js';
 import { recordAgg100ms } from './memory.js';
@@ -22,26 +22,31 @@ async function main() {
   await initSchema();
   await initSrcAgg100ms();
   const cfg = loadConfig();
-  // Backfill recent CEX prices if local history is missing/stale to enable immediate backtest/calibrate.
-  await runBackfillIfNeeded();
+  // 严格模式：不做1m回填，完全依赖 100ms enrich + 实时writer
   // Seed feed thresholds from config if provided (deviation/heartbeat pinned by feed owner)
   await seedOracleThresholdsFromConfig();
-  // Strict mode: enrich recent events into 100ms bins before fitting (default on; disable with PREDICTOR_ENRICH_ON_START=0)
+  // 启动时：若不存在有效校准（lag_ms>0 且存在权重），则先 enrich 再 calibrate
   try {
-    const doEnrich = process.env.PREDICTOR_ENRICH_ON_START !== '0';
-    if (doEnrich) {
-      const f = await makeFetchWithProxy();
-      const cfg = loadConfig();
-      const limit = Math.max(10, Math.min(200, Number(process.env.PREDICTOR_ENRICH_LIMIT ?? 100)));
-      const windowSec = Math.max(30, Math.min(300, Number(process.env.PREDICTOR_ENRICH_WINDOW ?? 120)));
-      const aheadSec = Math.max(0, Math.min(30, Number(process.env.PREDICTOR_ENRICH_AHEAD ?? 10)));
-      for (const o of (cfg as any).oracles ?? []) {
-        await enrichEvents(Number(o.chainId), String(o.address), limit, windowSec, aheadSec, f);
+    const f = await makeFetchWithProxy();
+    const cfg2 = loadConfig();
+    for (const o of (cfg2 as any).oracles ?? []) {
+      const { rows } = await pool.query(
+        `SELECT lag_ms FROM oracle_pred_config WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)`,
+        [Number(o.chainId), String(o.address)],
+      );
+      const lagMs = Number(rows[0]?.lag_ms ?? 0);
+      const { rows: wrows } = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM oracle_cex_weights WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)`,
+        [Number(o.chainId), String(o.address)],
+      );
+      const hasWeights = Number(wrows[0]?.n ?? 0) > 0;
+      if (!(lagMs > 0 && hasWeights)) {
+        console.log(`⚙️  missing calibration for ${o.address}, enriching & calibrating...`);
+        await enrichEvents(Number(o.chainId), String(o.address), 120, 120, 10, f);
+        await runAutoCalibrateOnce();
       }
     }
-  } catch (e) { console.warn('enrich-on-start failed:', e); }
-  // Startup backtest fitting (slow & gentle): derives lagSeconds and weights (~100ms grid using DB seconds)
-  try { await runStartupFit(); } catch (e) { console.warn('startup fit failed:', e); }
+  } catch (e) { console.warn('startup enrich/calibrate failed:', e); }
   // Start oracle transmit watcher (polling) to continuously build samples
   await startOracleWatcher();
   const agg = new PriceAggregator(
