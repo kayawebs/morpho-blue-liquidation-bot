@@ -151,29 +151,40 @@ async function main() {
   // 接收 scheduler 推送
   const wsUrl = `ws://localhost:48201/ws/schedule?chainId=${MARKET.chainId}&oracle=${MARKET.aggregator}`;
   let latest: Sched | undefined;
+  let shotQueue: number[] = [];
   const ws = new WebSocket(wsUrl);
   ws.on("open", () => console.log(`📡 已连接 oracle-scheduler: ${wsUrl}`));
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(String(data));
-      if (msg?.data) latest = msg.data as Sched;
+      if (msg?.data) {
+        latest = msg.data as Sched;
+        const dev: any = (latest as any).deviation;
+        if (dev?.shotsMs && Array.isArray(dev.shotsMs)) {
+          const now = Date.now();
+          for (const t of dev.shotsMs as number[]) if (t > now) shotQueue.push(t);
+          // dedupe & sort
+          shotQueue = Array.from(new Set(shotQueue)).sort((a,b)=>a-b);
+        }
+      }
     } catch {}
   });
   ws.on("close", () => console.log("⚠️ scheduler WS 断开，等待重连(由系统自动)"));
   ws.on("error", () => {});
 
-  // 主循环：在窗口内用预测价进行评估与清算
+  // 主循环：按照 scheduler shots 触发（50ms 精度）
   setInterval(async () => {
-    if (!latest) return;
-    const now = Math.floor(Date.now() / 1000);
-    const win = latest.deviation ?? latest.heartbeat;
-    if (!win) return;
-    // 提前量：在 prewarm 阶段也尝试（适度保守，避免 spam）
-    const active = now >= (win.start ?? 0) - 1 && now <= (win.end ?? 0);
-    if (!active) return;
+    const nowMs = Date.now();
+    if (shotQueue.length === 0) return;
+    if (shotQueue[0]! > nowMs) return;
+    // 取出到期 shots（允许轻微拖后）
+    const due: number[] = [];
+    while (shotQueue.length && shotQueue[0]! <= nowMs + 10) due.push(shotQueue.shift()!);
+    if (due.length === 0) return;
 
     // 获取预测价（以 updatedAt-lag 对齐）；若无 updatedAt 则用当前时间
-    let updatedAt = now;
+    const nowSec = Math.floor(nowMs / 1000);
+    let updatedAt = nowSec;
     try {
       const round: any = await (publicClient as any).readContract({ address: MARKET.aggregator, abi: [{...AGGREGATOR_V2V3_ABI[0]} as any], functionName: 'latestRoundData' });
       updatedAt = Number(round[3]) || now;
@@ -277,7 +288,7 @@ async function main() {
     }));
     const attempts = selected.length;
     const successes = results.filter(Boolean).length;
-    if (attempts > 0) console.log(`⚡ [Predictive] window触发(${win.state ?? 'n/a'}): attempts=${attempts}, successes=${successes}`);
+    if (attempts > 0) console.log(`⚡ [Predictive] shots触发: attempts=${attempts}, successes=${successes}`);
   }, 1000);
 
   await fetchCandidates();

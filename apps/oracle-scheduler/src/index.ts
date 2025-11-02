@@ -27,6 +27,17 @@ async function getOracleMeta(chainId: number, agg: string): Promise<{ decimals: 
   }
 }
 
+async function getFitSummary(chainId: number, agg: string): Promise<{ p50AbsBps: number; p90AbsBps: number; biasBps: number } | undefined> {
+  try {
+    const url = new URL(`/oracles/${chainId}/${agg}/fitSummary`, PREDICTOR_URL);
+    url.searchParams.set('limit', '120');
+    const res = await fetch(url);
+    if (!res.ok) return undefined;
+    const data = await res.json();
+    return { p50AbsBps: Number(data?.p50AbsBps ?? 0), p90AbsBps: Number(data?.p90AbsBps ?? 0), biasBps: Number(data?.biasMedianBps ?? 0) };
+  } catch { return undefined; }
+}
+
 async function fetchPredictedAt(chainId: number, agg: string, tsSec: number, lagSec: number): Promise<number | undefined> {
   try {
     const url = new URL(`/oracles/${chainId}/${agg}/predictionAt`, PREDICTOR_URL);
@@ -114,25 +125,43 @@ async function fetchNextWindow(chainId: number, agg: string, heartbeat: number, 
   const jit = st.profiles.heartbeat.jitter;
   const hbStart = last.ts + heartbeat + (jit.p10 ?? 0);
   const hbEnd = last.ts + heartbeat + (jit.p90 ?? 0);
-  // Deviation window (predictive; simplified): estimate delta & v
+  // Deviation window + aggressive shots plan
+  const fit = await getFitSummary(chainId, agg);
+  const p90 = Math.max(0, Math.min(offsetBps, Number(fit?.p90AbsBps ?? 5)));
+  const p50 = Math.max(0, Math.min(offsetBps, Number(fit?.p50AbsBps ?? 3)));
+  const T1 = Math.max(1, offsetBps - p90);
+  const T2 = Math.max(1, offsetBps - p50);
+  const T3 = Math.max(1, offsetBps - 1);
+
   const nowSec = Math.floor(Date.now()/1000);
   const predNow = await fetchPredictedAt(chainId, agg, nowSec, lagSeconds);
   const predPrev = await fetchPredictedAt(chainId, agg, nowSec - 1, lagSeconds);
-  const aPrev = last.answer; // use last on-chain as baseline
+  const aPrev = last.answer;
   let devWin: any = undefined;
   if (predNow && predPrev && aPrev > 0) {
     const dNow = Math.abs(predNow - aPrev)/aPrev*10_000;
     const dPrev = Math.abs(predPrev - aPrev)/aPrev*10_000;
-    const v = Math.max(0, dNow - dPrev); // bps per sec
-    const preMargin = 3;
-    if (dNow >= (offsetBps - preMargin)) {
-      const rem = Math.max(0, offsetBps - dNow);
-      const vMin = 0.5; // bps/s floor
-      const tau = rem / Math.max(v, vMin);
+    const v = Math.max(0, dNow - dPrev); // bps/s approx
+    const vMin = 0.5;
+    const tau = (rem: number) => rem / Math.max(v, vMin);
+    const shotsMs: number[] = [];
+    const nowMs = Date.now();
+    if (dNow >= T3) {
+      for (const dt of [-20, 20, 60]) { const t = nowMs + dt; if (t > nowMs) shotsMs.push(t); }
+      devWin = { start: nowSec - 1, end: nowSec + 3, state: 'commit', deltaBps: dNow, shotsMs };
+    } else if (dNow >= T2) {
+      for (const dt of [20, 60, 100]) shotsMs.push(nowMs + dt);
+      devWin = { start: nowSec, end: nowSec + 5, state: 'boost', deltaBps: dNow, shotsMs };
+    } else if (dNow >= T1) {
+      for (const dt of [60, 120]) shotsMs.push(nowMs + dt);
+      devWin = { start: nowSec, end: nowSec + 10, state: 'prewarm', deltaBps: dNow, shotsMs };
+    } else {
+      const rem1 = Math.max(0, T1 - dNow);
+      const rem2 = Math.max(0, T2 - dNow);
+      const t1 = nowSec + Math.round(tau(rem1));
+      const t2 = nowSec + Math.round(tau(rem2));
       const lead = st.profiles.deviation.leadSec;
-      const errP90 = 2; // small modeling error buffer
-      const tCross = nowSec + Math.round(tau);
-      devWin = { start: tCross - errP90, end: tCross + (lead.p90 ?? 5) + errP90, state: dNow >= offsetBps ? 'confirmed' : 'prewarm', deltaBps: dNow };
+      devWin = { start: t1, end: t2 + (lead.p50 ?? 3), state: 'forecast', deltaBps: dNow, shotsMs };
     }
   }
   return { heartbeat: { start: hbStart, end: hbEnd }, deviation: devWin };

@@ -16,6 +16,7 @@ import { seedOracleThresholdsFromConfig } from './seedThresholds.js';
 import { enrichEvents } from './enrich.js';
 import { makeFetchWithProxy } from './utils/proxy.js';
 import { recordAgg100ms } from './memory.js';
+import { pool } from './db.js';
 
 async function main() {
   // Fetch proxy is applied per-request inside HttpPollConnector.
@@ -62,8 +63,8 @@ async function main() {
   };
 
   const useWs = cfg.aggregator && (cfg.aggregator as any).ws !== false;
-  const useDirectWs = process.env.PREDICTOR_WS_DIRECT === '1' || process.env.PREDICTOR_WS_MODE === 'direct';
-  const wsConnector = useDirectWs ? new DirectWsConnector(onTick) : new MultiCexConnector(onTick);
+  // Force direct WS connector so OKX uses ws.okx.com instead of legacy domains
+  const wsConnector = new DirectWsConnector(onTick);
   const httpConnector = new HttpPollConnector(onTick, 1000);
   if (useWs) {
     await wsConnector.start();

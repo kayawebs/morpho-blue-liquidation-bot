@@ -1,11 +1,12 @@
 {
-  "exchanges": ["binance", "okx", "coinbase"],
+  "exchanges": ["coinbase", "okx", "kraken", "bitstamp"],
   "pairs": [
     {
       "symbol": "BTCUSDC",
-      "binance": "BTCUSDC",
+      "coinbase": "BTC-USD",
       "okx": "BTC-USDC",
-      "coinbase": "BTC-USD"
+      "kraken": "XBTUSDC",
+      "bitstamp": "btcusdc"
     }
   ],
   "aggregator": {
@@ -13,9 +14,10 @@
     "trimRatio": 0.2,
     "minExchanges": 1,
     "weights": {
-      "binance": 1.0,
+      "coinbase": 1.0,
       "okx": 1.0,
-      "coinbase": 1.0
+      "kraken": 1.0,
+      "bitstamp": 1.0
     },
     "ws": true
   },

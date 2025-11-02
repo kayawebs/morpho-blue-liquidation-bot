@@ -109,6 +109,96 @@ export async function fetchCoinbaseTrades(fetchImpl: typeof fetch, productId: st
   return out;
 }
 
+export async function fetchKrakenTrades(fetchImpl: typeof fetch, pair: string, startMs: number, endMs: number): Promise<Trade[]> {
+  const out: Trade[] = [];
+  let since: string | undefined = undefined; // kraken uses id-like since (ns)
+  let guard = 0;
+  while (guard++ < 100) {
+    const url = new URL('https://api.kraken.com/0/public/Trades');
+    url.searchParams.set('pair', pair);
+    if (since) url.searchParams.set('since', since);
+    dbg('kraken GET', url.toString());
+    const res = await fetchImpl(url.toString(), { headers: { 'accept': 'application/json', 'user-agent': 'MBLB/1.0' } }).catch((e:any)=>{ console.warn('kraken fetch error:', e?.message ?? e); return undefined as any; });
+    if (!res || !res.ok) break;
+    const json = await res.json();
+    const data = json?.result?.[pair] ?? json?.result?.[Object.keys(json?.result ?? {})[0] ?? ''];
+    if (!Array.isArray(data) || data.length === 0) break;
+    for (const t of data) {
+      const tsSec = Number(t?.[2] ?? t?.time);
+      const price = Number(t?.[0] ?? t?.price);
+      if (!Number.isFinite(tsSec) || !Number.isFinite(price)) continue;
+      const ts = Math.floor(tsSec * 1000);
+      if (ts < startMs) return out;
+      if (ts <= endMs) out.push({ ts, price });
+    }
+    since = String(json?.result?.last ?? '');
+    if (!since) break;
+    await new Promise(r=>setTimeout(r, 150));
+  }
+  return out;
+}
+
+export async function fetchBitstampTrades(fetchImpl: typeof fetch, pair: string, startMs: number, endMs: number): Promise<Trade[]> {
+  const out: Trade[] = [];
+  // Bitstamp transactions API: last hour/day; we'll fetch hour then day if needed
+  for (const horizon of ['hour','day']) {
+    const url = `https://www.bitstamp.net/api/v2/transactions/${encodeURIComponent(pair)}/?time=${horizon}`;
+    dbg('bitstamp GET', url);
+    const res = await fetchImpl(url, { headers: { 'accept': 'application/json', 'user-agent': 'MBLB/1.0' } }).catch((e:any)=>{ console.warn('bitstamp fetch error:', e?.message ?? e); return undefined as any; });
+    if (!res || !res.ok) continue;
+    const data = await res.json();
+    if (!Array.isArray(data)) continue;
+    for (const d of data) {
+      const tsSec = Number(d?.date);
+      const price = Number(d?.price);
+      if (!Number.isFinite(tsSec) || !Number.isFinite(price)) continue;
+      const ts = tsSec * 1000;
+      if (ts < startMs) continue;
+      if (ts <= endMs) out.push({ ts, price });
+    }
+    if (out.length > 0) break;
+    await new Promise(r=>setTimeout(r, 120));
+  }
+  return out;
+}
+
+export async function fetchGeminiTrades(fetchImpl: typeof fetch, symbol: string, startMs: number, endMs: number): Promise<Trade[]> {
+  const out: Trade[] = [];
+  const url = `https://api.gemini.com/v1/trades/${encodeURIComponent(symbol)}?limit_trades=500`;
+  dbg('gemini GET', url);
+  const res = await fetchImpl(url, { headers: { 'accept': 'application/json', 'user-agent': 'MBLB/1.0' } }).catch((e:any)=>{ console.warn('gemini fetch error:', e?.message ?? e); return undefined as any; });
+  if (!res || !res.ok) return out;
+  const data = await res.json();
+  if (!Array.isArray(data)) return out;
+  for (const d of data) {
+    const ts = Number(d?.timestampms);
+    const price = Number(d?.price);
+    if (!Number.isFinite(ts) || !Number.isFinite(price)) continue;
+    if (ts < startMs) continue;
+    if (ts <= endMs) out.push({ ts, price });
+  }
+  return out;
+}
+
+export async function fetchBitfinexTrades(fetchImpl: typeof fetch, symbol: string, startMs: number, endMs: number): Promise<Trade[]> {
+  const out: Trade[] = [];
+  const url = `https://api-pub.bitfinex.com/v2/trades/${encodeURIComponent(symbol)}/hist?start=${startMs}&end=${endMs}&limit=1000&sort=1`;
+  dbg('bitfinex GET', url);
+  const res = await fetchImpl(url, { headers: { 'accept': 'application/json', 'user-agent': 'MBLB/1.0' } }).catch((e:any)=>{ console.warn('bitfinex fetch error:', e?.message ?? e); return undefined as any; });
+  if (!res || !res.ok) return out;
+  const data = await res.json();
+  if (!Array.isArray(data)) return out;
+  for (const t of data) {
+    // [ID, MTS, AMOUNT, PRICE]
+    const ts = Number(t?.[1]);
+    const price = Number(t?.[3]);
+    if (!Number.isFinite(ts) || !Number.isFinite(price)) continue;
+    if (ts < startMs) continue;
+    if (ts <= endMs) out.push({ ts, price });
+  }
+  return out;
+}
+
 export function binTradesTo100ms(trades: Trade[], startMs: number, endMs: number): Map<number, number> {
   const map = new Map<number, number[]>();
   for (const tr of trades) {
@@ -178,6 +268,18 @@ export async function enrichEvents(chainId: number, oracle: string, limit = 100,
     try {
       if (coinbaseProd) per['coinbase'] = binTradesTo100ms(await fetchCoinbaseTrades(f, coinbaseProd, startMs, endMs), startMs, endMs);
     } catch (e) { console.warn('coinbase enrich failed:', (e as any)?.message ?? e); }
+    try {
+      if ((pair as any)?.kraken) per['kraken'] = binTradesTo100ms(await fetchKrakenTrades(f, (pair as any).kraken, startMs, endMs), startMs, endMs);
+    } catch (e) { console.warn('kraken enrich failed:', (e as any)?.message ?? e); }
+    try {
+      if ((pair as any)?.bitstamp) per['bitstamp'] = binTradesTo100ms(await fetchBitstampTrades(f, (pair as any).bitstamp, startMs, endMs), startMs, endMs);
+    } catch (e) { console.warn('bitstamp enrich failed:', (e as any)?.message ?? e); }
+    try {
+      if ((pair as any)?.gemini) per['gemini'] = binTradesTo100ms(await fetchGeminiTrades(f, (pair as any).gemini, startMs, endMs), startMs, endMs);
+    } catch (e) { console.warn('gemini enrich failed:', (e as any)?.message ?? e); }
+    try {
+      if ((pair as any)?.bitfinex) per['bitfinex'] = binTradesTo100ms(await fetchBitfinexTrades(f, (pair as any).bitfinex, startMs, endMs), startMs, endMs);
+    } catch (e) { console.warn('bitfinex enrich failed:', (e as any)?.message ?? e); }
     if (Object.keys(per).length === 0) {
       console.warn(`⚠️ enrich skipped for ts=${tsSec} (no sources available)`);
       continue;
@@ -214,6 +316,10 @@ export async function enrichEventsAt(chainId: number, oracle: string, tsList: nu
     try { if (binanceSym) per['binance'] = binTradesTo100ms(await fetchBinanceTrades(f, binanceSym, startMs, endMs), startMs, endMs); } catch (e) { console.warn('binance enrich failed:', (e as any)?.message ?? e); }
     try { if (okxInst) per['okx'] = binTradesTo100ms(await fetchOkxTrades(f, okxInst, startMs, endMs), startMs, endMs); } catch (e) { console.warn('okx enrich failed:', (e as any)?.message ?? e); }
     try { if (coinbaseProd) per['coinbase'] = binTradesTo100ms(await fetchCoinbaseTrades(f, coinbaseProd, startMs, endMs), startMs, endMs); } catch (e) { console.warn('coinbase enrich failed:', (e as any)?.message ?? e); }
+    try { if ((pair as any)?.kraken) per['kraken'] = binTradesTo100ms(await fetchKrakenTrades(f, (pair as any).kraken, startMs, endMs), startMs, endMs); } catch (e) { console.warn('kraken enrich failed:', (e as any)?.message ?? e); }
+    try { if ((pair as any)?.bitstamp) per['bitstamp'] = binTradesTo100ms(await fetchBitstampTrades(f, (pair as any).bitstamp, startMs, endMs), startMs, endMs); } catch (e) { console.warn('bitstamp enrich failed:', (e as any)?.message ?? e); }
+    try { if ((pair as any)?.gemini) per['gemini'] = binTradesTo100ms(await fetchGeminiTrades(f, (pair as any).gemini, startMs, endMs), startMs, endMs); } catch (e) { console.warn('gemini enrich failed:', (e as any)?.message ?? e); }
+    try { if ((pair as any)?.bitfinex) per['bitfinex'] = binTradesTo100ms(await fetchBitfinexTrades(f, (pair as any).bitfinex, startMs, endMs), startMs, endMs); } catch (e) { console.warn('bitfinex enrich failed:', (e as any)?.message ?? e); }
     if (Object.keys(per).length === 0) { console.warn(`⚠️ enrich skipped for ts=${tsSec} (no sources available)`); continue; }
     for (const [src, bins] of Object.entries(per)) await upsertSrc(symbol, src, bins);
     const tsSet = new Set<number>();
