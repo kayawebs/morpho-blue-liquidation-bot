@@ -2,7 +2,7 @@ import './env.js';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { loadSchedulerConfig } from './config.js';
-import { createPublicClient, http, getAbiItem } from 'viem';
+import { createPublicClient, http, webSocket, getAbiItem } from 'viem';
 import WebSocket, { WebSocketServer } from 'ws';
 
 type RoundEvt = { roundId: number; ts: number; answer: number; block: bigint };
@@ -13,6 +13,16 @@ const subs: Record<FeedKey, Set<WebSocket>> = {};
 const lastNext: Record<FeedKey, string> = {};
 
 const PREDICTOR_URL = process.env.PREDICTOR_URL ?? 'http://localhost:48080';
+const BOOT_LOOKBACK_BLOCKS = BigInt(process.env.SCHED_BOOT_LOOKBACK_BLOCKS ?? '48000');
+const BOOT_CHUNK_BLOCKS = BigInt(process.env.SCHED_BOOT_CHUNK_BLOCKS ?? '4000');
+const REFRESH_INTERVAL_MS = Number(process.env.SCHED_REFRESH_INTERVAL ?? 3000);
+const HEARTBEAT_EARLY_SLACK = Number(process.env.SCHED_HEARTBEAT_EARLY_SLACK ?? 5);
+const HEARTBEAT_LATE_SLACK = Number(process.env.SCHED_HEARTBEAT_LATE_SLACK ?? 90);
+const HEARTBEAT_DELTA_FACTOR = Number(process.env.SCHED_HEARTBEAT_DELTA_FACTOR ?? 0.5);
+
+function makeFeedKey(chainId: number, agg: string): FeedKey {
+  return `${chainId}:${agg.toLowerCase()}`;
+}
 
 async function getOracleMeta(chainId: number, agg: string): Promise<{ decimals: number; lagSeconds: number; offsetBps: number; heartbeatSeconds: number } | undefined> {
   try {
@@ -52,6 +62,20 @@ async function fetchPredictedAt(chainId: number, agg: string, tsSec: number, lag
   }
 }
 
+async function fetchPredictedAtMs(chainId: number, agg: string, tsMs: number, lagMs: number): Promise<number | undefined> {
+  try {
+    const url = new URL(`/oracles/${chainId}/${agg}/predictionAt`, PREDICTOR_URL);
+    url.searchParams.set('tsMs', String(Math.floor(tsMs)));
+    if (Number.isFinite(lagMs) && lagMs > 0) url.searchParams.set('lagMs', String(Math.floor(lagMs)));
+    const res = await fetch(url);
+    if (!res.ok) return undefined;
+    const data = await res.json();
+    return Number(data?.answer);
+  } catch {
+    return undefined;
+  }
+}
+
 function quantiles(nums: number[], qs: number[]) {
   if (nums.length === 0) return Object.fromEntries(qs.map((q) => [q, undefined]));
   const arr = [...nums].sort((a, b) => a - b);
@@ -69,62 +93,89 @@ async function analyzeProfiles(chainId: number, agg: string, heartbeat: number, 
   if (!st) return;
   const evts = st.events;
   if (evts.length < 5) return;
-  // Heartbeat stats
-  const gaps: number[] = [];
-  const jitters: number[] = [];
-  for (let i = 1; i < evts.length; i++) {
-    const g = evts[i]!.ts - evts[i - 1]!.ts;
-    gaps.push(g);
-    jitters.push(g - heartbeat);
-  }
-  const gapQ = quantiles(gaps, [0.1, 0.5, 0.9]);
-  const jitQ = quantiles(jitters, [0.1, 0.5, 0.9]);
+  // Classify gaps into heartbeat vs deviation-triggered
+  const hbGaps: number[] = [];
+  const hbJitters: number[] = [];
+  const devIndices: number[] = [];
+  const hbLower = Math.max(0, heartbeat - HEARTBEAT_EARLY_SLACK);
+  const hbUpper = heartbeat + HEARTBEAT_LATE_SLACK;
+  const hbDeltaCap = offsetBps * HEARTBEAT_DELTA_FACTOR;
 
-  // Deviation lead stats (post-cross approximation)
-  // For last M events, search backward from t_k to find earliest s where |pred(s)-a_prev|/a_prev >= offset
+  for (let i = 1; i < evts.length; i++) {
+    const prev = evts[i - 1]!;
+    const cur = evts[i]!;
+    const gap = cur.ts - prev.ts;
+    if (!(prev.answer > 0)) {
+      devIndices.push(i);
+      continue;
+    }
+    const deltaBps = Math.abs(cur.answer - prev.answer) / prev.answer * 10_000;
+    const isHeartbeat = gap >= hbLower && gap <= hbUpper && deltaBps <= hbDeltaCap;
+    if (isHeartbeat) {
+      hbGaps.push(gap);
+      hbJitters.push(gap - heartbeat);
+    } else {
+      devIndices.push(i);
+    }
+  }
+
+  const gapQ = quantiles(hbGaps, [0.1, 0.5, 0.9]);
+  const jitQ = quantiles(hbJitters, [0.1, 0.5, 0.9]);
+
+  // Deviation lead stats (post-cross approximation) using deviation samples only
   const leads: number[] = [];
-  const M = Math.min(30, evts.length - 1);
-  for (let idx = evts.length - M; idx < evts.length; idx++) {
+  const devSampleCount = devIndices.length;
+  const indicesToCheck = devIndices.slice(-Math.min(30, devSampleCount));
+  const lagMs = Number.isFinite(lagSeconds) ? Math.max(0, lagSeconds * 1000) : 0;
+  for (const idx of indicesToCheck) {
     if (idx <= 0) continue;
     const cur = evts[idx]!;
     const prev = evts[idx - 1]!;
     const aPrev = prev.answer;
     if (!(aPrev > 0)) continue;
-    const maxBack = 120; // seconds
-    let sIn: number | undefined;
-    // backward search with 1s step
-    for (let s = cur.ts; s >= cur.ts - maxBack; s -= 1) {
-      const pred = await fetchPredictedAt(chainId, agg, s, lagSeconds);
+    const maxBackMs = 120_000;
+    const curMs = cur.ts * 1000;
+    let sInMs: number | undefined;
+    for (let sMs = curMs; sMs >= curMs - maxBackMs; sMs -= 100) {
+      const pred = await fetchPredictedAtMs(chainId, agg, sMs, lagMs);
       if (!(pred && pred > 0)) continue;
       const deltaBps = Math.abs(pred - aPrev) / aPrev * 10_000;
       if (deltaBps >= offsetBps) {
-        // Optional consecutive confirmation: check s+1,s+2 also >= offset
-        const p1 = await fetchPredictedAt(chainId, agg, s + 1, lagSeconds);
-        const p2 = await fetchPredictedAt(chainId, agg, s + 2, lagSeconds);
+        const p1 = await fetchPredictedAtMs(chainId, agg, sMs + 100, lagMs);
+        const p2 = await fetchPredictedAtMs(chainId, agg, sMs + 200, lagMs);
         const ok1 = p1 && Math.abs(p1 - aPrev) / aPrev * 10_000 >= offsetBps;
         const ok2 = p2 && Math.abs(p2 - aPrev) / aPrev * 10_000 >= offsetBps;
-        if (ok1 && ok2) { sIn = s; break; }
+        if (ok1 && ok2) { sInMs = sMs; break; }
       }
     }
-    if (sIn !== undefined) leads.push(cur.ts - sIn);
+    if (sInMs !== undefined) leads.push((curMs - sInMs) / 1000);
   }
   const leadQ = quantiles(leads, [0.1, 0.5, 0.9]);
   st.profiles = {
-    heartbeat: { gap: { p10: gapQ[0.1], p50: gapQ[0.5], p90: gapQ[0.9] }, jitter: { p10: jitQ[0.1], p50: jitQ[0.5], p90: jitQ[0.9] } },
-    deviation: { leadSec: { p10: leadQ[0.1], p50: leadQ[0.5], p90: leadQ[0.9] } },
+    heartbeat: {
+      samples: hbGaps.length,
+      gap: { p10: gapQ[0.1], p50: gapQ[0.5], p90: gapQ[0.9] },
+      jitter: { p10: jitQ[0.1], p50: jitQ[0.5], p90: jitQ[0.9] },
+    },
+    deviation: {
+      samples: leads.length,
+      leadSec: { p10: leadQ[0.1], p50: leadQ[0.5], p90: leadQ[0.9] },
+    },
     updatedAt: Math.floor(Date.now()/1000)
   };
 }
 
 async function fetchNextWindow(chainId: number, agg: string, heartbeat: number, offsetBps: number, lagSeconds: number) {
-  const key: FeedKey = `${chainId}:${agg.toLowerCase()}`;
+  const key = makeFeedKey(chainId, agg);
   const st = state[key];
   if (!st || !st.profiles || st.events.length === 0) return undefined;
   const last = st.events[st.events.length - 1]!;
   // Heartbeat window using jitter p10/p90
-  const jit = st.profiles.heartbeat.jitter;
-  const hbStart = last.ts + heartbeat + (jit.p10 ?? 0);
-  const hbEnd = last.ts + heartbeat + (jit.p90 ?? 0);
+  const jit = st.profiles.heartbeat?.jitter ?? {};
+  const hbJitterStart = typeof jit.p10 === 'number' && Number.isFinite(jit.p10) ? jit.p10 : -30;
+  const hbJitterEnd = typeof jit.p90 === 'number' && Number.isFinite(jit.p90) ? jit.p90 : 90;
+  const hbStart = last.ts + heartbeat + hbJitterStart;
+  const hbEnd = last.ts + heartbeat + hbJitterEnd;
   // Deviation window + aggressive shots plan
   const fit = await getFitSummary(chainId, agg);
   const p90 = Math.max(0, Math.min(offsetBps, Number(fit?.p90AbsBps ?? 5)));
@@ -167,6 +218,61 @@ async function fetchNextWindow(chainId: number, agg: string, heartbeat: number, 
   return { heartbeat: { start: hbStart, end: hbEnd }, deviation: devWin };
 }
 
+async function broadcastNextWindow(feed: { chainId: number; aggregator: string }, heartbeat: number, offsetBps: number, lagSeconds: number) {
+  const next = await fetchNextWindow(feed.chainId, feed.aggregator, heartbeat, offsetBps, lagSeconds);
+  if (!next) return;
+  const key = makeFeedKey(feed.chainId, feed.aggregator);
+  const payload = JSON.stringify({ type: 'update', feed: key, ts: Math.floor(Date.now() / 1000), data: next });
+  if (lastNext[key] === payload) return;
+  lastNext[key] = payload;
+  const listeners = subs[key];
+  if (!listeners || listeners.size === 0) return;
+  for (const ws of listeners) {
+    try { ws.send(payload); } catch {}
+  }
+}
+
+async function bootstrapFeed(client: ReturnType<typeof createPublicClient>, evt: any, feed: { chainId: number; aggregator: string }, decimals: number) {
+  try {
+    console.log(`⏳ bootstrap start for ${feed.chainId}:${feed.aggregator}`);
+    const head = await client.getBlockNumber();
+    const from = head > BOOT_LOOKBACK_BLOCKS ? head - BOOT_LOOKBACK_BLOCKS : 0n;
+    const chunk = BOOT_CHUNK_BLOCKS > 0n ? BOOT_CHUNK_BLOCKS : 4000n;
+    const evts: RoundEvt[] = [];
+    let cursor = from;
+    let fetched = 0;
+    while (cursor <= head) {
+      const to = cursor + chunk - 1n > head ? head : cursor + chunk - 1n;
+      const logs = await client.getLogs({ address: feed.aggregator as `0x${string}`, event: evt, fromBlock: cursor, toBlock: to } as any);
+      fetched += logs.length;
+      if (logs.length > 0) {
+        for (const l of logs as any[]) {
+          const blk = await client.getBlock({ blockNumber: l.blockNumber });
+          const tsSec = Number(blk.timestamp);
+          const roundId = Number(l.args.aggregatorRoundId);
+          const answer = Number(l.args.answer) / 10 ** decimals;
+          evts.push({ roundId, ts: tsSec, answer, block: l.blockNumber });
+        }
+      }
+      console.log(`  ↳ chunk ${cursor.toString()}-${to.toString()} logs=${logs.length}`);
+      cursor = to + 1n;
+    }
+    if (evts.length === 0) {
+      console.warn(`⚠️ bootstrap found no transmissions for ${feed.chainId}:${feed.aggregator}`);
+      return undefined;
+    }
+    evts.sort((a, b) => a.ts - b.ts);
+    const key = makeFeedKey(feed.chainId, feed.aggregator);
+    if (evts.length > 2048) evts.splice(0, evts.length - 2048);
+    state[key].events = evts;
+    console.log(`✅ bootstrap done for ${feed.chainId}:${feed.aggregator} events=${evts.length} fetched=${fetched} from=${from.toString()} head=${head.toString()}`);
+    return evts.length > 0 ? evts[evts.length - 1]!.block : undefined;
+  } catch (e) {
+    console.warn(`bootstrap failed for ${feed.chainId}:${feed.aggregator}`, (e as any)?.message ?? e);
+    return undefined;
+  }
+}
+
 async function main() {
   const cfg = loadSchedulerConfig();
   const app = new Hono();
@@ -204,7 +310,7 @@ async function main() {
       const chainId = Number(url.searchParams.get('chainId'));
       const oracle = String(url.searchParams.get('oracle') ?? '').toLowerCase();
       if (!Number.isFinite(chainId) || !oracle) { ws.close(); return; }
-      const key: FeedKey = `${chainId}:${oracle}`;
+      const key = makeFeedKey(chainId, oracle);
       if (!subs[key]) subs[key] = new Set();
       subs[key]!.add(ws);
       ws.on('close', () => { subs[key]!.delete(ws); });
@@ -226,16 +332,22 @@ async function main() {
 
   // Start watchers per feed
   for (const f of cfg.feeds) {
-    const key: FeedKey = `${f.chainId}:${f.aggregator.toLowerCase()}`;
+    const key = makeFeedKey(f.chainId, f.aggregator);
     const meta = await getOracleMeta(f.chainId, f.aggregator);
     const decimals = meta?.decimals ?? 8;
     state[key] = { events: [], decimals, lastAnalyzedCount: 0 };
-    const rpc = process.env[`RPC_URL_${f.chainId}`];
-    if (!rpc) {
-      console.warn(`No RPC_URL_${f.chainId} in env; feed ${key} watcher disabled`);
+    const httpRpc = process.env[`RPC_URL_${f.chainId}`];
+    const wsRpc = process.env[`WS_RPC_URL_${f.chainId}`];
+    if (!httpRpc && !wsRpc) {
+      console.warn(`No RPC_URL_${f.chainId} or WS_RPC_URL_${f.chainId} in env; feed ${key} watcher disabled`);
       continue;
     }
-    const client = createPublicClient({ transport: http(rpc as any) });
+    if (wsRpc) console.log(`🔌 feed ${key}: using WS ${wsRpc}`);
+    else console.log(`🔌 feed ${key}: using HTTP ${httpRpc}`);
+    const transport = wsRpc
+      ? webSocket(wsRpc as any, { retryDelay: 1000, retryCount: Infinity })
+      : http(httpRpc as any);
+    const client = createPublicClient({ transport });
     const evt = getAbiItem({
       abi: [
         { type: 'event', name: 'NewTransmission', inputs: [
@@ -250,6 +362,17 @@ async function main() {
       name: 'NewTransmission'
     }) as any;
     let lastBlock: bigint | undefined;
+
+    const bootBlock = await bootstrapFeed(client, evt, f, decimals);
+    if (bootBlock) lastBlock = bootBlock;
+    const initHb = meta?.heartbeatSeconds ?? f.heartbeatSeconds;
+    const initOffset = meta?.offsetBps ?? f.deviationBps;
+    const initLag = meta?.lagSeconds ?? 0;
+    if (state[key].events.length > 0) {
+      await analyzeProfiles(f.chainId, f.aggregator, initHb, initOffset, initLag);
+      state[key].lastAnalyzedCount = state[key].events.length;
+      await broadcastNextWindow(f, initHb, initOffset, initLag);
+    }
     const poll = async () => {
       try {
         const head = await client.getBlockNumber();
@@ -270,24 +393,14 @@ async function main() {
         // Analyze if new events arrived
         const stt = state[key];
         const meta2 = await getOracleMeta(f.chainId, f.aggregator);
-        if (stt.events.length > stt.lastAnalyzedCount && meta2) {
-          await analyzeProfiles(f.chainId, f.aggregator, meta2.heartbeatSeconds, meta2.offsetBps, meta2.lagSeconds);
-          // After analysis, compute next window & broadcast if changed
-          const next = await fetchNextWindow(f.chainId, f.aggregator, meta2.heartbeatSeconds, meta2.offsetBps, meta2.lagSeconds);
-          if (next) {
-            const key = `${f.chainId}:${f.aggregator.toLowerCase()}`;
-            const payload = JSON.stringify({ type: 'update', feed: key, ts: Math.floor(Date.now()/1000), data: next });
-            if (lastNext[key] !== payload) {
-              lastNext[key] = payload;
-              const set = subs[key];
-              if (set && set.size > 0) {
-                for (const sock of set) {
-                  try { sock.send(payload); } catch {}
-                }
-              }
-            }
-          }
+        const hb = meta2?.heartbeatSeconds ?? f.heartbeatSeconds;
+        const offset = meta2?.offsetBps ?? f.deviationBps;
+        const lag = meta2?.lagSeconds ?? 0;
+        if (stt.events.length > stt.lastAnalyzedCount) {
+          console.log(`📈 analyze ${key}: newEvents=${stt.events.length - stt.lastAnalyzedCount}`);
+          await analyzeProfiles(f.chainId, f.aggregator, hb, offset, lag);
           stt.lastAnalyzedCount = stt.events.length;
+          await broadcastNextWindow(f, hb, offset, lag);
         }
       } catch (e) {
         console.warn(`Watcher error for ${key}:`, (e as any)?.message ?? e);
@@ -296,6 +409,18 @@ async function main() {
     };
     void poll();
     console.log(`⏱ Started watcher for ${key}`);
+
+    setInterval(() => {
+      (async () => {
+        const metaCur = await getOracleMeta(f.chainId, f.aggregator);
+        const hb = metaCur?.heartbeatSeconds ?? f.heartbeatSeconds;
+        const offset = metaCur?.offsetBps ?? f.deviationBps;
+        const lag = metaCur?.lagSeconds ?? 0;
+        await broadcastNextWindow(f, hb, offset, lag);
+      })().catch((e) => {
+        console.warn(`refresh error for ${key}:`, (e as any)?.message ?? e);
+      });
+    }, REFRESH_INTERVAL_MS);
   }
 }
 

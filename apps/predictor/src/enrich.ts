@@ -113,6 +113,7 @@ export async function fetchKrakenTrades(fetchImpl: typeof fetch, pair: string, s
   const out: Trade[] = [];
   let since: string | undefined = undefined; // kraken uses id-like since (ns)
   let guard = 0;
+  let prevSince = '';
   while (guard++ < 100) {
     const url = new URL('https://api.kraken.com/0/public/Trades');
     url.searchParams.set('pair', pair);
@@ -131,8 +132,10 @@ export async function fetchKrakenTrades(fetchImpl: typeof fetch, pair: string, s
       if (ts < startMs) return out;
       if (ts <= endMs) out.push({ ts, price });
     }
-    since = String(json?.result?.last ?? '');
-    if (!since) break;
+    const nextSince = String(json?.result?.last ?? '');
+    if (!nextSince || nextSince === prevSince) break; // no progress, stop paging
+    prevSince = nextSince;
+    since = nextSince;
     await new Promise(r=>setTimeout(r, 150));
   }
   return out;

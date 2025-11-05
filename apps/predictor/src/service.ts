@@ -264,16 +264,16 @@ export function buildApp(deps: PredictorDeps) {
     if (!Number.isFinite(ts)) return c.json({ error: hasMs ? 'tsMs (milliseconds) required' : 'ts (seconds) required' }, 400);
     const lagQ = Number(c.req.query('lag'));
     const lagMsQ = Number(c.req.query('lagMs'));
-    // Default to DB lag_ms if no override provided
-    const dbLagMs = Number(row.lag_ms ?? 0) || (Number(row.lag_seconds ?? 0) * 1000);
-    const effLagMs = Number.isFinite(lagMsQ) ? lagMsQ : (Number.isFinite(lagQ) ? lagQ * 1000 : dbLagMs);
-    const at = hasMs ? (ts - effLagMs) : (ts - Math.round(effLagMs / 1000));
     const rowRes = await pool.query(
-      'SELECT heartbeat_seconds, offset_bps, decimals, scale_factor FROM oracle_pred_config WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)',
+      'SELECT heartbeat_seconds, offset_bps, decimals, scale_factor, lag_seconds, lag_ms FROM oracle_pred_config WHERE chain_id=$1 AND lower(oracle_addr)=lower($2)',
       [chainId, addr],
     );
     if (rowRes.rows.length === 0) return c.json({ error: 'config not found' }, 404);
     const row = rowRes.rows[0]!;
+    // Default to DB lag_ms if no override provided
+    const dbLagMs = Number(row.lag_ms ?? 0) || (Number(row.lag_seconds ?? 0) * 1000);
+    const effLagMs = Number.isFinite(lagMsQ) ? lagMsQ : (Number.isFinite(lagQ) ? lagQ * 1000 : dbLagMs);
+    const at = hasMs ? (ts - effLagMs) : (ts - Math.round(effLagMs / 1000));
     const adapter = buildAdapter(chainId, addr);
     const required = adapter.requiredSymbols();
     const aggMap: Record<string, number | undefined> = {};
