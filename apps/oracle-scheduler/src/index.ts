@@ -4,8 +4,9 @@ import { serve } from '@hono/node-server';
 import { loadSchedulerConfig } from './config.js';
 import { createPublicClient, http, webSocket, getAbiItem } from 'viem';
 import WebSocket, { WebSocketServer } from 'ws';
+import { initSchedulerSchema, insertOutliers } from './db.js';
 
-type RoundEvt = { roundId: number; ts: number; answer: number; block: bigint };
+type RoundEvt = { roundId: number; ts: number; answer: number; block: bigint; txHash?: string };
 type FeedKey = string; // `${chainId}:${aggregator.toLowerCase()}`
 
 const state: Record<FeedKey, { events: RoundEvt[]; decimals: number; lastAnalyzedCount: number; profiles?: any }> = {};
@@ -16,9 +17,7 @@ const PREDICTOR_URL = process.env.PREDICTOR_URL ?? 'http://localhost:48080';
 const BOOT_LOOKBACK_BLOCKS = BigInt(process.env.SCHED_BOOT_LOOKBACK_BLOCKS ?? '48000');
 const BOOT_CHUNK_BLOCKS = BigInt(process.env.SCHED_BOOT_CHUNK_BLOCKS ?? '4000');
 const REFRESH_INTERVAL_MS = Number(process.env.SCHED_REFRESH_INTERVAL ?? 3000);
-const HEARTBEAT_EARLY_SLACK = Number(process.env.SCHED_HEARTBEAT_EARLY_SLACK ?? 5);
-const HEARTBEAT_LATE_SLACK = Number(process.env.SCHED_HEARTBEAT_LATE_SLACK ?? 90);
-const HEARTBEAT_DELTA_FACTOR = Number(process.env.SCHED_HEARTBEAT_DELTA_FACTOR ?? 0.5);
+const HEARTBEAT_SLACK = Number(process.env.SCHED_HEARTBEAT_SLACK ?? 90);
 
 function makeFeedKey(chainId: number, agg: string): FeedKey {
   return `${chainId}:${agg.toLowerCase()}`;
@@ -97,30 +96,96 @@ async function analyzeProfiles(chainId: number, agg: string, heartbeat: number, 
   const hbGaps: number[] = [];
   const hbJitters: number[] = [];
   const devIndices: number[] = [];
-  const hbLower = Math.max(0, heartbeat - HEARTBEAT_EARLY_SLACK);
-  const hbUpper = heartbeat + HEARTBEAT_LATE_SLACK;
-  const hbDeltaCap = offsetBps * HEARTBEAT_DELTA_FACTOR;
+  const outliers: {
+    roundId: number;
+    txHash?: string;
+    ts: number;
+    gap: number;
+    deltaBps: number;
+    reason: string;
+    prevRoundId: number;
+  }[] = [];
+  const hbSlack = HEARTBEAT_SLACK;
 
   for (let i = 1; i < evts.length; i++) {
     const prev = evts[i - 1]!;
     const cur = evts[i]!;
     const gap = cur.ts - prev.ts;
-    if (!(prev.answer > 0)) {
-      devIndices.push(i);
+    if (!(prev.answer > 0) || !(cur.answer > 0)) {
+      outliers.push({
+        roundId: cur.roundId,
+        txHash: cur.txHash,
+        ts: cur.ts,
+        gap,
+        deltaBps: 0,
+        reason: 'invalid_answer',
+        prevRoundId: prev.roundId,
+      });
       continue;
     }
     const deltaBps = Math.abs(cur.answer - prev.answer) / prev.answer * 10_000;
-    const isHeartbeat = gap >= hbLower && gap <= hbUpper && deltaBps <= hbDeltaCap;
-    if (isHeartbeat) {
+    if (deltaBps >= offsetBps) {
+      devIndices.push(i);
+      continue;
+    }
+    if (gap < 0) {
+      outliers.push({
+        roundId: cur.roundId,
+        txHash: cur.txHash,
+        ts: cur.ts,
+        gap,
+        deltaBps,
+        reason: 'negative_gap',
+        prevRoundId: prev.roundId,
+      });
+      continue;
+    }
+    const withinHeartbeat = Math.abs(gap - heartbeat) <= hbSlack;
+    if (withinHeartbeat) {
       hbGaps.push(gap);
       hbJitters.push(gap - heartbeat);
     } else {
-      devIndices.push(i);
+      outliers.push({
+        roundId: cur.roundId,
+        txHash: cur.txHash,
+        ts: cur.ts,
+        gap,
+        deltaBps,
+        reason: 'ambiguous_gap',
+        prevRoundId: prev.roundId,
+      });
     }
   }
 
   const gapQ = quantiles(hbGaps, [0.1, 0.5, 0.9]);
   const jitQ = quantiles(hbJitters, [0.1, 0.5, 0.9]);
+
+  if (outliers.length > 0) {
+    try {
+      await insertOutliers(
+        outliers.map((o) => ({
+          chainId,
+          oracleAddr: agg,
+          roundId: o.roundId,
+          reason: o.reason,
+          txHash: o.txHash,
+          ts: o.ts,
+          gapSeconds: o.gap,
+          deltaBps: o.deltaBps,
+          details: {
+            prevRoundId: o.prevRoundId,
+            heartbeat,
+            slack: hbSlack,
+          },
+        })),
+      );
+    } catch (e) {
+      console.warn(
+        `outlier insert failed for ${chainId}:${agg.toLowerCase()}`,
+        (e as any)?.message ?? e,
+      );
+    }
+  }
 
   // Deviation lead stats (post-cross approximation) using deviation samples only
   const leads: number[] = [];
@@ -161,6 +226,9 @@ async function analyzeProfiles(chainId: number, agg: string, heartbeat: number, 
       samples: leads.length,
       leadSec: { p10: leadQ[0.1], p50: leadQ[0.5], p90: leadQ[0.9] },
     },
+    outliers: {
+      samples: outliers.length,
+    },
     updatedAt: Math.floor(Date.now()/1000)
   };
 }
@@ -172,8 +240,8 @@ async function fetchNextWindow(chainId: number, agg: string, heartbeat: number, 
   const last = st.events[st.events.length - 1]!;
   // Heartbeat window using jitter p10/p90
   const jit = st.profiles.heartbeat?.jitter ?? {};
-  const hbJitterStart = typeof jit.p10 === 'number' && Number.isFinite(jit.p10) ? jit.p10 : -30;
-  const hbJitterEnd = typeof jit.p90 === 'number' && Number.isFinite(jit.p90) ? jit.p90 : 90;
+  const hbJitterStart = typeof jit.p10 === 'number' && Number.isFinite(jit.p10) ? jit.p10 : -HEARTBEAT_SLACK;
+  const hbJitterEnd = typeof jit.p90 === 'number' && Number.isFinite(jit.p90) ? jit.p90 : HEARTBEAT_SLACK;
   const hbStart = last.ts + heartbeat + hbJitterStart;
   const hbEnd = last.ts + heartbeat + hbJitterEnd;
   // Deviation window + aggressive shots plan
@@ -211,7 +279,7 @@ async function fetchNextWindow(chainId: number, agg: string, heartbeat: number, 
       const rem2 = Math.max(0, T2 - dNow);
       const t1 = nowSec + Math.round(tau(rem1));
       const t2 = nowSec + Math.round(tau(rem2));
-      const lead = st.profiles.deviation.leadSec;
+      const lead = st.profiles.deviation?.leadSec ?? {};
       devWin = { start: t1, end: t2 + (lead.p50 ?? 3), state: 'forecast', deltaBps: dNow, shotsMs };
     }
   }
@@ -251,7 +319,8 @@ async function bootstrapFeed(client: ReturnType<typeof createPublicClient>, evt:
           const tsSec = Number(blk.timestamp);
           const roundId = Number(l.args.aggregatorRoundId);
           const answer = Number(l.args.answer) / 10 ** decimals;
-          evts.push({ roundId, ts: tsSec, answer, block: l.blockNumber });
+          const txHash = l.transactionHash ? String(l.transactionHash) : undefined;
+          evts.push({ roundId, ts: tsSec, answer, block: l.blockNumber, txHash });
         }
       }
       console.log(`  ↳ chunk ${cursor.toString()}-${to.toString()} logs=${logs.length}`);
@@ -274,6 +343,7 @@ async function bootstrapFeed(client: ReturnType<typeof createPublicClient>, evt:
 }
 
 async function main() {
+  await initSchedulerSchema();
   const cfg = loadSchedulerConfig();
   const app = new Hono();
   app.get('/health', (c) => c.text('ok'));
@@ -384,9 +454,10 @@ async function main() {
           const tsSec = Number(blk.timestamp);
           const roundId = Number(l.args.aggregatorRoundId);
           const answer = Number(l.args.answer) / 10 ** decimals;
+          const txHash = l.transactionHash ? String(l.transactionHash) : undefined;
           const arr = state[key].events;
-          if (!arr.some((e) => e.block === l.blockNumber)) {
-            arr.push({ roundId, ts: tsSec, answer, block: l.blockNumber });
+          if (!arr.some((e) => e.block === l.blockNumber && e.roundId === roundId)) {
+            arr.push({ roundId, ts: tsSec, answer, block: l.blockNumber, txHash });
             if (arr.length > 2048) arr.splice(0, arr.length - 2048);
           }
         }

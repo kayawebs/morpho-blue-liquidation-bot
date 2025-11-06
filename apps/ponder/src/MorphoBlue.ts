@@ -1,5 +1,12 @@
+import { and, eq } from "ponder";
 import { ponder } from "ponder:registry";
-import { market, position, authorization } from "ponder:schema";
+import {
+  market,
+  position,
+  authorization,
+  preLiquidationContract,
+  preLiquidationPosition,
+} from "ponder:schema";
 
 import { zeroFloorSub } from "./utils";
 import { readContract } from "viem/actions";
@@ -649,4 +656,31 @@ ponder.on("Morpho:SetAuthorization", async ({ event, context }) => {
     .onConflictDoUpdate(() => ({
       isAuthorized: event.args.newIsAuthorized,
     }));
+
+  const pre = await context.db.query.preLiquidationContract.findFirst({
+    where: (row) =>
+      and(eq(row.chainId, context.chain.id), eq(row.address, event.args.authorized)),
+  });
+  if (!pre || !fastCheck(pre.marketId)) return;
+
+  try {
+    await context.db
+      .insert(preLiquidationPosition)
+      .values({
+        chainId: context.chain.id,
+        marketId: pre.marketId,
+        user: event.args.authorizer,
+        preLiquidation: event.args.authorized,
+        isAuthorized: event.args.newIsAuthorized,
+        updatedBlock: event.block.number,
+        updatedTimestamp: event.block.timestamp,
+      })
+      .onConflictDoUpdate(() => ({
+        isAuthorized: event.args.newIsAuthorized,
+        updatedBlock: event.block.number,
+        updatedTimestamp: event.block.timestamp,
+      }));
+  } catch {
+    /* ignore DB insert errors for derived table */
+  }
 });

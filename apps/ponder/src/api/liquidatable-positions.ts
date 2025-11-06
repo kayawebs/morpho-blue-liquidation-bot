@@ -43,29 +43,30 @@ export async function getLiquidatablePositions({
       .select({
         position: schema.position,
         preLiquidationContract: schema.preLiquidationContract,
+        status: schema.preLiquidationPosition,
       })
-      .from(schema.preLiquidationContract)
-      .leftJoin(
-        schema.authorization,
+      .from(schema.preLiquidationPosition)
+      .innerJoin(
+        schema.preLiquidationContract,
         and(
-          eq(schema.authorization.chainId, schema.preLiquidationContract.chainId),
-          eq(schema.authorization.authorizee, schema.preLiquidationContract.address),
-          eq(schema.authorization.isAuthorized, true),
+          eq(schema.preLiquidationContract.chainId, schema.preLiquidationPosition.chainId),
+          eq(schema.preLiquidationContract.address, schema.preLiquidationPosition.preLiquidation),
         ),
       )
       .innerJoin(
         schema.position,
         and(
-          eq(schema.position.chainId, schema.preLiquidationContract.chainId),
-          eq(schema.position.marketId, schema.preLiquidationContract.marketId),
-          eq(schema.position.user, schema.authorization.authorizer),
+          eq(schema.position.chainId, schema.preLiquidationPosition.chainId),
+          eq(schema.position.marketId, schema.preLiquidationPosition.marketId),
+          eq(schema.position.user, schema.preLiquidationPosition.user),
           gt(schema.position.borrowShares, 0n),
         ),
       )
       .where(
         and(
-          eq(schema.preLiquidationContract.chainId, chainId),
-          inArray(schema.preLiquidationContract.marketId, marketIds),
+          eq(schema.preLiquidationPosition.chainId, chainId),
+          inArray(schema.preLiquidationPosition.marketId, marketIds),
+          eq(schema.preLiquidationPosition.isAuthorized, true),
         ),
       ),
   ]);

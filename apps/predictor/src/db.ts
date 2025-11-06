@@ -65,6 +65,22 @@ export async function initSchema() {
       PRIMARY KEY (symbol, ts_ms)
     );
     CREATE INDEX IF NOT EXISTS idx_cex_agg_100ms_symbol_ts ON cex_agg_100ms(symbol, ts_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS oracle_timing_outliers (
+      chain_id INTEGER NOT NULL,
+      oracle_addr TEXT NOT NULL,
+      round_id BIGINT NOT NULL,
+      reason TEXT NOT NULL,
+      tx_hash TEXT,
+      event_ts TIMESTAMPTZ,
+      gap_seconds INTEGER,
+      delta_bps DOUBLE PRECISION,
+      details JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (chain_id, oracle_addr, round_id, reason)
+    );
+    CREATE INDEX IF NOT EXISTS idx_oracle_timing_outliers_ts
+      ON oracle_timing_outliers(oracle_addr, event_ts DESC);
   `);
 }
 

@@ -116,26 +116,35 @@ app.post("/chain/:chainId/positions", async (c) => {
 
   // Authorized pre-liquidation contracts mapped by (marketId,user)
   const preRows = await db
-    .select({ position: schema.position, pre: schema.preLiquidationContract })
-    .from(schema.preLiquidationContract)
+    .select({
+      position: schema.position,
+      pre: schema.preLiquidationContract,
+      status: schema.preLiquidationPosition,
+    })
+    .from(schema.preLiquidationPosition)
     .innerJoin(
-      schema.authorization,
+      schema.preLiquidationContract,
       and(
-        eq(schema.authorization.chainId, schema.preLiquidationContract.chainId),
-        eq(schema.authorization.authorizee, schema.preLiquidationContract.address),
-        eq(schema.authorization.isAuthorized, true),
+        eq(schema.preLiquidationContract.chainId, schema.preLiquidationPosition.chainId),
+        eq(schema.preLiquidationContract.address, schema.preLiquidationPosition.preLiquidation),
       ),
     )
     .innerJoin(
       schema.position,
       and(
-        eq(schema.position.chainId, schema.preLiquidationContract.chainId),
-        eq(schema.position.marketId, schema.preLiquidationContract.marketId),
-        eq(schema.position.user, schema.authorization.authorizer),
+        eq(schema.position.chainId, schema.preLiquidationPosition.chainId),
+        eq(schema.position.marketId, schema.preLiquidationPosition.marketId),
+        eq(schema.position.user, schema.preLiquidationPosition.user),
         gt(schema.position.borrowShares, 0n),
       ),
     )
-    .where(and(eq(schema.preLiquidationContract.chainId, chainId), inArray(schema.preLiquidationContract.marketId, marketIds)));
+    .where(
+      and(
+        eq(schema.preLiquidationPosition.chainId, chainId),
+        inArray(schema.preLiquidationPosition.marketId, marketIds),
+        eq(schema.preLiquidationPosition.isAuthorized, true),
+      ),
+    );
 
   const preMap = new Map<string, (typeof preRows)[number]["pre"][]>();
   for (const r of preRows) {

@@ -122,10 +122,53 @@ export const preLiquidationContract = onchainTable(
   }),
 );
 
-export const preLiquidationContractRelations = relations(preLiquidationContract, ({ one }) => ({
+export const preLiquidationPosition = onchainTable(
+  "pre_liquidation_position",
+  (t) => ({
+    chainId: t.integer().notNull(),
+    marketId: t.hex().notNull(),
+    user: t.hex().notNull(),
+    preLiquidation: t.hex().notNull(),
+    isAuthorized: t.boolean().notNull().default(false),
+    updatedBlock: t.bigint().notNull(),
+    updatedTimestamp: t.bigint().notNull(),
+  }),
+  (table) => ({
+    pk: primaryKey({
+      columns: [table.chainId, table.marketId, table.user, table.preLiquidation],
+    }),
+    marketIdx: index().on(table.chainId, table.marketId),
+    userIdx: index().on(table.chainId, table.user),
+  }),
+);
+
+export const preLiquidationContractRelations = relations(preLiquidationContract, ({ one, many }) => ({
   market: one(market, {
     fields: [preLiquidationContract.chainId, preLiquidationContract.marketId],
     references: [market.chainId, market.id],
+  }),
+  positions: many(preLiquidationPosition),
+}));
+
+export const preLiquidationPositionRelations = relations(preLiquidationPosition, ({ one }) => ({
+  market: one(market, {
+    fields: [preLiquidationPosition.chainId, preLiquidationPosition.marketId],
+    references: [market.chainId, market.id],
+  }),
+  contract: one(preLiquidationContract, {
+    fields: [
+      preLiquidationPosition.chainId,
+      preLiquidationPosition.preLiquidation,
+    ],
+    references: [preLiquidationContract.chainId, preLiquidationContract.address],
+  }),
+  position: one(position, {
+    fields: [
+      preLiquidationPosition.chainId,
+      preLiquidationPosition.marketId,
+      preLiquidationPosition.user,
+    ],
+    references: [position.chainId, position.marketId, position.user],
   }),
 }));
 
