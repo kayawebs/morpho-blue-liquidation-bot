@@ -50,10 +50,32 @@ const OCR2_NEW_TRANSMISSION = [
 async function main() {
   const cfg = chainConfig(MARKET.chainId);
 
-  const publicClient = createPublicClient({
-    chain: base,
-    transport: cfg.wsRpcUrl ? webSocket(cfg.wsRpcUrl) : http(cfg.rpcUrl),
-  });
+  const baseTransport = cfg.wsRpcUrl
+    ? webSocket(cfg.wsRpcUrl, { retryCount: Infinity, retryDelay: 1_000 })
+    : http(cfg.rpcUrl);
+  const publicClient = createPublicClient({ chain: base, transport: baseTransport });
+
+  const triggerMode = (process.env.CONFIRM_TRIGGER_MODE ?? 'nextblock').toLowerCase();
+  const flashWs =
+    process.env[`FLASHBLOCK_WS_URL_${MARKET.chainId}`] ?? process.env.FLASHBLOCK_WS_URL;
+  const flashHttp =
+    process.env[`FLASHBLOCK_RPC_URL_${MARKET.chainId}`] ?? process.env.FLASHBLOCK_RPC_URL;
+  const wantFlashblock = triggerMode === 'flashblock';
+  const flashTransport = flashWs
+    ? webSocket(flashWs, { retryCount: Infinity, retryDelay: 1_000 })
+    : flashHttp
+      ? http(flashHttp)
+      : undefined;
+  const triggerClient =
+    wantFlashblock && flashTransport
+      ? createPublicClient({ chain: base, transport: flashTransport })
+      : publicClient;
+  const flashActive = wantFlashblock && triggerClient !== publicClient;
+  if (wantFlashblock && !flashActive) {
+    console.warn(
+      '⚠️ flashblock mode requested but FLASHBLOCK_RPC/WS not configured; falling back to nextblock mode',
+    );
+  }
   // 读取多执行器配置（逗号分隔），否则回退为单执行器
   function parseList(key: string): string[] | undefined {
     const v = process.env[key];
@@ -84,6 +106,11 @@ async function main() {
 
   console.log("🚀 启动确认型 Worker: Base cbBTC/USDC");
   console.log(`🔗 Aggregator: ${MARKET.aggregator}`);
+  console.log(
+    flashActive
+      ? `⚡️ Trigger mode: flashblock via ${flashWs ?? flashHttp}`
+      : '⏱ Trigger mode: nextblock confirmations (public RPC)',
+  );
 
   // 执行器与定价/流动性组件（沿用现有实现）
   const basePricer = new BaseChainlinkPricer();
@@ -235,9 +262,9 @@ async function main() {
 
   // 事件确认与处理队列
   type QItem = { blockNumber: bigint; txIndex: number; logIndex: number; txHash?: string; blockHash?: string };
+  const CONFIRMATIONS = flashActive ? 0 : 1; // flashblock无需等下个区块
   const queue: QItem[] = [];
   const seen = new Set<string>();
-  const CONFIRMATIONS = 1; // 固定为1，不提供配置
   let head: bigint = 0n;
   let eventsReceived = 0;
   let eventsProcessed = 0;
@@ -280,7 +307,7 @@ async function main() {
   let lastEventAt = 0;
 
   function startEventWatch() {
-    unwatchEvent = publicClient.watchEvent({
+    unwatchEvent = triggerClient.watchEvent({
       address: MARKET.aggregator,
       event: evt,
       onLogs: (logs: any[]) => {
@@ -295,6 +322,9 @@ async function main() {
             txHash: l.transactionHash as string | undefined,
             blockHash: l.blockHash as string | undefined,
           });
+          if (flashActive && typeof l.blockNumber === 'bigint' && l.blockNumber > head) {
+            head = l.blockNumber;
+          }
           eventsReceived++;
           if (VERBOSE) console.log(`🛰 onLogs queued key=${key} queue=${queue.length}`);
           // 记录审计：尽量带上 roundId/answer（从解码参数，若可用）
@@ -319,6 +349,7 @@ async function main() {
               : a.txIndex - b.txIndex
             : Number(a.blockNumber - b.blockNumber),
         );
+        if (flashActive) void processMatured();
       },
       onError: (err: any) => {
         console.warn('⚠️ event subscription error:', err?.message ?? String(err));
@@ -350,13 +381,13 @@ async function main() {
     }
   }
   function startBlockWatch() {
-    unwatchBlocks = publicClient.watchBlocks({
+    unwatchBlocks = triggerClient.watchBlocks({
       emitMissed: true,
       includeTransactions: false,
       onBlock: async (blk: any) => {
       try {
         if (!blk || typeof blk.number === 'undefined') {
-          const n = await publicClient.getBlockNumber();
+          const n = await triggerClient.getBlockNumber();
           head = n;
         } else {
           head = blk.number as bigint;
