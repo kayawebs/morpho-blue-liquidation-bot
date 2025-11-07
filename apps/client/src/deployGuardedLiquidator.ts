@@ -7,16 +7,67 @@ import { waitForTransactionReceipt, deployContract } from "viem/actions";
 
 dotenv.config();
 
-function loadArtifact() {
+async function compileWithSolc() {
+  const sourcePath = path.join(process.cwd(), "contracts", "GuardedLiquidator.sol");
+  if (!fs.existsSync(sourcePath)) {
+    throw new Error(`Missing contracts/GuardedLiquidator.sol (looked for ${sourcePath})`);
+  }
+  console.log("ℹ️ Compiling GuardedLiquidator via solc...");
+  const source = fs.readFileSync(sourcePath, "utf8");
+  const solcMod = await import("solc");
+  const solcInstance = (solcMod as any).default ?? solcMod;
+  const input = {
+    language: "Solidity",
+    sources: {
+      "GuardedLiquidator.sol": { content: source },
+    },
+    settings: {
+      optimizer: { enabled: true, runs: 200 },
+      viaIR: true,
+      outputSelection: {
+        "*": {
+          "*": ["abi", "evm.bytecode.object"],
+        },
+      },
+    },
+  };
+  const output = JSON.parse(solcInstance.compile(JSON.stringify(input)));
+  if (output.errors && output.errors.length > 0) {
+    const err = output.errors.find((e: any) => e.severity === "error");
+    if (err) {
+      throw new Error(`solc error: ${err.formattedMessage ?? err.message}`);
+    }
+    for (const warn of output.errors) {
+      console.warn(warn.formattedMessage ?? warn.message);
+    }
+  }
+  const contract = output.contracts?.["GuardedLiquidator.sol"]?.GuardedLiquidator;
+  if (!contract?.abi || !contract?.evm?.bytecode?.object) {
+    throw new Error("solc output missing abi/bytecode");
+  }
+  const bytecodeRaw = contract.evm.bytecode.object as string;
+  const bytecode = (bytecodeRaw.startsWith("0x") ? bytecodeRaw : `0x${bytecodeRaw}`) as Hex;
+  // Persist artifact for future runs (out/GuardedLiquidator.sol/GuardedLiquidator.json)
+  const outDir = path.join(process.cwd(), "out", "GuardedLiquidator.sol");
+  try {
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(outDir, "GuardedLiquidator.json"),
+      JSON.stringify({ abi: contract.abi, bytecode }, null, 2),
+    );
+  } catch {}
+  return { abi: contract.abi as any[], bytecode };
+}
+
+async function loadArtifact() {
   // Try Foundry first
   const foundry = path.join(process.cwd(), "out", "GuardedLiquidator.sol", "GuardedLiquidator.json");
   if (fs.existsSync(foundry)) return JSON.parse(fs.readFileSync(foundry, "utf8"));
   // Try Hardhat default
   const hh = path.join(process.cwd(), "artifacts", "contracts", "GuardedLiquidator.sol", "GuardedLiquidator.json");
   if (fs.existsSync(hh)) return JSON.parse(fs.readFileSync(hh, "utf8"));
-  throw new Error(
-    "Cannot find GuardedLiquidator artifact. Please compile with Foundry (forge build) or Hardhat before running this script.",
-  );
+  // Fallback to on-the-fly compilation
+  return compileWithSolc();
 }
 
 async function main() {
@@ -36,7 +87,7 @@ async function main() {
     account: privateKeyToAccount(priv as Hex),
   });
 
-  const artifact = loadArtifact();
+  const artifact = await loadArtifact();
   const abi = artifact.abi as any[];
   const bytecode = (artifact.bytecode ?? artifact.byteCode ?? artifact.deployedBytecode ?? artifact.bytecode?.object) as Hex;
   if (!abi || !bytecode) throw new Error("Invalid artifact (missing abi/bytecode)");

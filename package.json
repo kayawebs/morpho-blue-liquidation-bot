@@ -22,6 +22,7 @@
   "dependencies": {
     "@morpho-org/blue-sdk": "^3.0.9",
     "@types/ws": "^8.18.1",
+    "solc": "^0.8.24",
     "ponder": "^0.11.1",
     "tsx": "^4.19.3",
     "viem": "^2.23.2",
