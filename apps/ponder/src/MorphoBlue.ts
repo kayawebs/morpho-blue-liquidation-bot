@@ -657,10 +657,16 @@ ponder.on("Morpho:SetAuthorization", async ({ event, context }) => {
       isAuthorized: event.args.newIsAuthorized,
     }));
 
-  const pre = await context.db.query.preLiquidationContract.findFirst({
-    where: (row) =>
-      and(eq(row.chainId, context.chain.id), eq(row.address, event.args.authorized)),
-  });
+  const [pre] = await context.db
+    .select()
+    .from(preLiquidationContract)
+    .where(
+      and(
+        eq(preLiquidationContract.chainId, context.chain.id),
+        eq(preLiquidationContract.address, event.args.authorized),
+      ),
+    )
+    .limit(1);
   if (!pre || !fastCheck(pre.marketId)) return;
 
   try {
