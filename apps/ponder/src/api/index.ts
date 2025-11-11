@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { and, client, eq, inArray, graphql, gt, replaceBigInts as replaceBigIntsBase } from "ponder";
-import { db } from "ponder:api";
+import { db, publicClients } from "ponder:api";
 import schema from "ponder:schema";
 import type { Address, Hex } from "viem";
 
