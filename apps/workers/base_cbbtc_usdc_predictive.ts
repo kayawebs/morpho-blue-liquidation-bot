@@ -39,7 +39,6 @@ type Sched = { heartbeat?: Win; deviation?: Win };
 async function main() {
   const cfg = chainConfig(MARKET.chainId);
   const publicClient = createPublicClient({ chain: base, transport: cfg.wsRpcUrl ? webSocket(cfg.wsRpcUrl) : http(cfg.rpcUrl) });
-  const walletClient = createWalletClient({ chain: base, transport: http(cfg.rpcUrl), account: privateKeyToAccount(cfg.liquidationPrivateKey) });
   const flashLiquidator =
     (process.env[`FLASH_LIQUIDATOR_ADDRESS_${MARKET.chainId}`] as Address | undefined) ??
     (process.env.FLASH_LIQUIDATOR_ADDRESS as Address | undefined);
@@ -57,18 +56,29 @@ async function main() {
     const arr = v.split(",").map((s) => s.trim()).filter(Boolean);
     return arr.length ? arr : undefined;
   }
-  const multiGuardAddrs = parseList(`FLASH_EXECUTOR_ADDRESSES_${MARKET.chainId}`) ?? parseList(`GUARD_ADDRESSES_${MARKET.chainId}`);
   const multiPrivKeys = parseList(`LIQUIDATION_PRIVATE_KEYS_${MARKET.chainId}`);
   const executors: { wc: ReturnType<typeof createWalletClient>; label: string }[] = [];
-  if (multiGuardAddrs && multiPrivKeys && multiGuardAddrs.length === multiPrivKeys.length) {
-    for (let i = 0; i < multiGuardAddrs.length; i++) {
-      const wc = createWalletClient({ chain: base, transport: http(cfg.rpcUrl), account: privateKeyToAccount(multiPrivKeys[i]! as any) });
-      executors.push({ wc, label: `exec#${i}` });
+  if (multiPrivKeys && multiPrivKeys.length > 0) {
+    for (let i = 0; i < multiPrivKeys.length; i++) {
+      const account = privateKeyToAccount(multiPrivKeys[i]! as `0x${string}`);
+      const wc = createWalletClient({ chain: base, transport: http(cfg.rpcUrl), account });
+      executors.push({ wc, label: `exec#${i}(${account.address})` });
     }
     console.log(`🔱 多执行器私钥配置: ${executors.length} 个`);
   } else {
-    console.warn("⚠️ 未配置 FLASH_EXECUTOR_ADDRESSES_*/LIQUIDATION_PRIVATE_KEYS_*, 默认使用单一执行私钥");
-    executors.push({ wc: walletClient as any, label: "default" });
+    const singleKey =
+      process.env[`LIQUIDATION_PRIVATE_KEY_${MARKET.chainId}`] ??
+      process.env.LIQUIDATION_PRIVATE_KEY;
+    if (!singleKey) {
+      throw new Error(
+        `LIQUIDATION_PRIVATE_KEYS_${MARKET.chainId} 或 LIQUIDATION_PRIVATE_KEY_${MARKET.chainId} 未配置`,
+      );
+    }
+    const account = privateKeyToAccount(singleKey as `0x${string}`);
+    executors.push({
+      wc: createWalletClient({ chain: base, transport: http(cfg.rpcUrl), account }),
+      label: `default(${account.address})`,
+    });
   }
 
   // 候选账户（与确认型相同）

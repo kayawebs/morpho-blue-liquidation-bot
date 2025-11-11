@@ -54,41 +54,32 @@ async function main() {
       stdio: ['inherit', 'pipe', 'pipe'],
       env,
     });
+    let conflict = false;
+    const handleConflict = () => {
+      if (conflict) return;
+      conflict = true;
+      console.error('❌ Schema conflict detected. Please drop the existing schema or set PONDER_DB_SCHEMA to a new name.');
+      console.error(`   Current schema: ${schema}`);
+      try { child.kill('SIGINT'); } catch {}
+      resolveExit(1);
+    };
     child.stdout.on('data', (d) => {
       const msg = d.toString();
       process.stdout.write(d);
-      if (!rolled && /previously used by a different Ponder app/i.test(msg)) {
-        rolled = true;
-        try { child.kill('SIGINT'); } catch {}
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const next = `${schema}_v${ts}`;
-        console.warn(`⚠️  Schema conflict. Auto-rolling to ${next} ...`);
-        startWithSchema(next).then((code) => resolveExit(code));
+      if (/previously used by a different Ponder app/i.test(msg)) {
+        handleConflict();
       }
     });
-    let rolled = false;
     child.stderr.on('data', (d) => {
       const msg = d.toString();
       process.stderr.write(d);
-      if (!rolled && /previously used by a different Ponder app/i.test(msg)) {
-        rolled = true;
-        try { child.kill('SIGINT'); } catch {}
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const next = `${schema}_v${ts}`;
-        console.warn(`⚠️  Schema conflict. Auto-rolling to ${next} ...`);
-        startWithSchema(next).then((code) => resolveExit(code));
+      if (/previously used by a different Ponder app/i.test(msg)) {
+        handleConflict();
       }
     });
     child.on('exit', (code) => {
-      if (!rolled && (code ?? 0) !== 0) {
-        rolled = true;
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const next = `${schema}_v${ts}`;
-        console.warn(`⚠️  Ponder exited (code=${code}). Auto-rolling schema to ${next} and restarting...`);
-        startWithSchema(next).then((c) => resolveExit(c));
-        return;
-      }
-      if (!rolled) resolveExit(code ?? 0);
+      if (conflict) return;
+      resolveExit(code ?? 0);
     });
   });
 
