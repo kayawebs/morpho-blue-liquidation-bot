@@ -57,9 +57,13 @@ async function main() {
 
   const triggerMode = (process.env.CONFIRM_TRIGGER_MODE ?? 'nextblock').toLowerCase();
   const flashWs =
-    process.env[`FLASHBLOCK_WS_URL_${MARKET.chainId}`] ?? process.env.FLASHBLOCK_WS_URL;
+    process.env[`FLASHBLOCK_WS_URL_${MARKET.chainId}`] ??
+    process.env.FLASHBLOCK_WS_URL ??
+    (triggerMode === 'flashblock' ? cfg.wsRpcUrl : undefined);
   const flashHttp =
-    process.env[`FLASHBLOCK_RPC_URL_${MARKET.chainId}`] ?? process.env.FLASHBLOCK_RPC_URL;
+    process.env[`FLASHBLOCK_RPC_URL_${MARKET.chainId}`] ??
+    process.env.FLASHBLOCK_RPC_URL ??
+    (triggerMode === 'flashblock' ? cfg.rpcUrl : undefined);
   const wantFlashblock = triggerMode === 'flashblock';
   const flashTransport = flashWs
     ? webSocket(flashWs, { retryCount: Infinity, retryDelay: 1_000 })
@@ -70,7 +74,7 @@ async function main() {
     wantFlashblock && flashTransport
       ? createPublicClient({ chain: base, transport: flashTransport })
       : publicClient;
-  const flashActive = wantFlashblock && triggerClient !== publicClient;
+  const flashActive = wantFlashblock && !!flashTransport;
   if (wantFlashblock && !flashActive) {
     console.warn(
       '⚠️ flashblock mode requested but FLASHBLOCK_RPC/WS not configured; falling back to nextblock mode',
