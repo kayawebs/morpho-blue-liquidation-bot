@@ -49,6 +49,7 @@ async function main() {
     BigInt(process.env.FLASH_LIQUIDATOR_MIN_PROFIT ?? "100000"); // 0.1 USDC
 
   console.log("🚀 启动预测型 Worker: Base cbBTC/USDC (WS 驱动)");
+  console.log(`⚙️  Flash liquidator: ${flashLiquidator}`);
 
   function parseList(key: string): string[] | undefined {
     const v = process.env[key];
