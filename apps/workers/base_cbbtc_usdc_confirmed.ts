@@ -13,13 +13,11 @@ import { privateKeyToAccount } from "viem/accounts";
 import { readContract } from "viem/actions";
 
 import type { IndexerAPIResponse } from "../client/src/utils/types.js";
-import { UniswapV3Venue } from "../client/src/liquidityVenues/uniswapV3/index.js";
 // import { BaseChainlinkPricer } from "../client/src/pricers/baseChainlink/index.js";
 import { morphoBlueAbi } from "../ponder/abis/MorphoBlue.js";
 import { AGGREGATOR_V2V3_ABI } from "./utils/chainlinkAbi.js";
 import { getAdapter } from "./oracleAdapters/registry.js";
-import { LiquidationEncoder } from "../client/src/utils/LiquidationEncoder.js";
-import { maxUint256, type Hex } from "viem";
+import { type Hex, Address as AddrType } from "viem";
 
 // 确认型策略：仅在链上预言机发生已确认的 NewTransmission 事件后，
 // 读取最新价格并精准评估清算，牺牲实时性，适合吃小额单。
@@ -34,31 +32,19 @@ const MARKET = {
 // Feed proxy for latestRoundData/round id
 const FEED_PROXY = "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F" as Address;
 
-// GuardedLiquidator ABI (minimal exec)
-const GUARDED_LIQ_ABI = [
+// FlashLiquidatorV3 (minimal ABI)
+const FLASH_LIQUIDATOR_ABI = [
   {
-    type: 'function',
-    name: 'exec',
-    stateMutability: 'payable',
     inputs: [
-      {
-        name: 'calls',
-        type: 'tuple[]',
-        components: [
-          { name: 'target', type: 'address' },
-          { name: 'value', type: 'uint256' },
-          { name: 'data', type: 'bytes' },
-        ],
-      },
-      { name: 'priceHint', type: 'uint256' },
-      { name: 'maxDevBps', type: 'uint16' },
-      { name: 'maxAgeSec', type: 'uint32' },
-      { name: 'prevRoundId', type: 'uint80' },
-      { name: 'profitToken', type: 'address' },
-      { name: 'minProfit', type: 'uint256' },
-      { name: 'deadline', type: 'uint256' },
+      { internalType: 'address', name: 'borrower', type: 'address' },
+      { internalType: 'uint256', name: 'requestedRepay', type: 'uint256' },
+      { internalType: 'uint80', name: 'prevRoundId', type: 'uint80' },
+      { internalType: 'uint256', name: 'minProfit', type: 'uint256' },
     ],
+    name: 'flashLiquidate',
     outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
   },
 ] as const;
 
@@ -147,9 +133,12 @@ async function main() {
       : '⏱ Trigger mode: nextblock confirmations (public RPC)',
   );
 
-  const uniswapV3Venue = new UniswapV3Venue();
-  const guardAddress = (process.env[`GUARDED_LIQUIDATOR_ADDRESS_${MARKET.chainId}`] as Address) ?? (process.env.GUARDED_LIQUIDATOR_ADDRESS as Address);
-  if (!guardAddress) throw new Error('GUARDED_LIQUIDATOR_ADDRESS_<chainId> or GUARDED_LIQUIDATOR_ADDRESS missing');
+  const flashLiquidator =
+    (process.env[`FLASH_LIQUIDATOR_ADDRESS_${MARKET.chainId}`] as Address | undefined) ??
+    (process.env.FLASH_LIQUIDATOR_ADDRESS as Address | undefined);
+  if (!flashLiquidator) throw new Error('FLASH_LIQUIDATOR_ADDRESS_<chainId> or FLASH_LIQUIDATOR_ADDRESS missing in .env');
+  const minProfitDefault = BigInt(process.env.FLASH_LIQUIDATOR_MIN_PROFIT ?? '100000');
+  console.log(`⚙️  Flash liquidator: ${flashLiquidator}`);
 
   // 账户候选集（默认从 Ponder API 获取；若不可用则回退为链上日志）
   const PONDER_API_URL = "http://localhost:42069";
