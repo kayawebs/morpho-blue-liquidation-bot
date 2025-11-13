@@ -15,8 +15,11 @@ const MARKET = {
   chainId: base.id,
   marketId: "0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836" as const,
   morphoAddress: "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb" as Address,
+  // Chainlink OCR2 aggregator (for events) and Feed proxy (for latestRoundData/roundId)
   aggregator: "0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8" as Address,
 };
+// Feed proxy used for prevRoundId reads to match on-chain gating
+const FEED_PROXY = "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F" as Address;
 
 const FLASH_LIQUIDATOR_ABI = [
   {
@@ -171,7 +174,7 @@ async function main() {
 
   async function fetchPrevRoundId(): Promise<bigint | null> {
     const round = (await readContract(publicClient as any, {
-      address: MARKET.aggregator,
+      address: FEED_PROXY,
       abi: AGGREGATOR_V2V3_ABI,
       functionName: "latestRoundData",
     })) as [bigint, bigint, bigint, bigint, bigint];
