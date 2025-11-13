@@ -625,65 +625,36 @@ async function main() {
         }
       } catch {}
       phase = 'executeLiquidations';
-      // 通过 GuardedLiquidator 执行（硬门控）
-      const MAX_DEV_BPS = Number(process.env.GUARD_MAX_DEV_BPS ?? '10'); // 0.1%
-      const MAX_AGE_SEC = Number(process.env.GUARD_MAX_AGE_SEC ?? '1200');
-      const MIN_PROFIT = BigInt(process.env.GUARD_MIN_PROFIT ?? '100000'); // 0.1 USDC
-
+      // 通过 FlashLiquidatorV3 执行（确认态 prevRoundId = latestRoundId - 1）
       const attempts = selected.length;
       let successes = 0;
-      // prevRoundId: 使用当前 feed roundId - 1（确认态）
       const latestRoundId = (round as any)[0] as bigint;
-      const priceHint = (round as any)[1] as bigint;
       const prevRoundId = latestRoundId > 0n ? latestRoundId - 1n : 0n;
 
-      await Promise.all(selected.map(async (v, i) => {
-        const wc = walletClients[i % walletClients.length]!;
-        const encoder = new LiquidationEncoder(guardAddress, wc as any);
-        // 路由 collateral -> loan
-        let toConvert = {
-          src: (paramsDump as any).collateralToken as Address,
-          dst: (paramsDump as any).loanToken as Address,
-          srcAmount: v.seizable,
-        };
-        if (await uniswapV3Venue.supportsRoute(encoder as any, toConvert.src, toConvert.dst)) {
-          toConvert = await uniswapV3Venue.convert(encoder as any, toConvert);
-        }
-        if (toConvert.src !== toConvert.dst) {
-          if (VERBOSE) console.warn('[route not found]', toConvert);
-          return;
-        }
-        // 授权 loanToken -> Morpho
-        (encoder as any).erc20Approve((paramsDump as any).loanToken as Address, MARKET.morphoAddress, maxUint256);
-        // 追加 Morpho 清算调用
-        (encoder as any).morphoBlueLiquidate(
-          MARKET.morphoAddress,
-          {
-            loanToken: (paramsDump as any).loanToken,
-            collateralToken: (paramsDump as any).collateralToken,
-            oracle: (paramsDump as any).oracle,
-            irm: (paramsDump as any).irm,
-            lltv: BigInt((paramsDump as any).lltv),
-          },
-          v.iposition.user as Address,
-          v.seizable,
-          0n,
-          (encoder as any).flush() as Hex[],
-        );
-        const calls = (encoder as any).flush();
-        try {
-          const deadline = BigInt(Math.floor(Date.now() / 1000) + 60);
-          await (wc as any).writeContract({
-            address: guardAddress,
-            abi: GUARDED_LIQ_ABI as any,
-            functionName: 'exec',
-            args: [calls, priceHint, MAX_DEV_BPS, MAX_AGE_SEC, prevRoundId, (paramsDump as any).loanToken, MIN_PROFIT, deadline],
-          });
-          successes++;
-        } catch (err) {
-          if (VERBOSE) console.warn('⚠️ guard exec failed:', (err as any)?.message ?? String(err));
-        }
-      }));
+      await Promise.all(
+        selected.map(async (v, i) => {
+          const wc = walletClients[i % walletClients.length]!;
+          try {
+            const tx = await (wc as any).writeContract({
+              address: (process.env[`FLASH_LIQUIDATOR_ADDRESS_${MARKET.chainId}`] as any) ?? (process.env.FLASH_LIQUIDATOR_ADDRESS as any),
+              abi: [
+                { inputs:[
+                  { internalType:'address', name:'borrower', type:'address' },
+                  { internalType:'uint256', name:'requestedRepay', type:'uint256' },
+                  { internalType:'uint80', name:'prevRoundId', type:'uint80' },
+                  { internalType:'uint256', name:'minProfit', type:'uint256' }
+                ], name:'flashLiquidate', outputs:[], stateMutability:'nonpayable', type:'function' }
+              ] as any,
+              functionName: 'flashLiquidate',
+              args: [v.iposition.user, 0n, prevRoundId, BigInt(process.env.FLASH_LIQUIDATOR_MIN_PROFIT ?? '100000')],
+            });
+            if (VERBOSE) console.log(`⚡ confirmed 清算 ${v.iposition.user} tx=${tx}`);
+            successes++;
+          } catch (err) {
+            if (VERBOSE) console.warn(`⚠️ flashLiquidate 失败 ${v.iposition.user}`, (err as any)?.message ?? String(err));
+          }
+        })
+      );
       console.log(`🧾 [Confirmed] handled transmit @ ${nowIso()} attempts=${attempts} (preLiq=0, liq=${selected.length}), successes=${successes}, candidates=${candidates.length}`);
       pushAudit({ ts: nowIso(), status: 'processed', tx: item?.txHash, block: item?.blockNumber?.toString?.(), attempts, successes });
       if (attempts === 0) {
