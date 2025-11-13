@@ -146,6 +146,7 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
     }
 
     event LiquidationExecuted(address indexed borrower, uint256 repayAssets, uint256 profit);
+    event Dbg(string tag, uint256 a, uint256 b);
 
     uint256 private constant BPS = 10_000;
     uint160 private constant MIN_SQRT_RATIO_PLUS = 4295128739 + 1;
@@ -167,6 +168,9 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
     Config public config;
 
     uint256 private _locked = 1;
+    // Debug helpers
+    uint8 private _dbgActive; // 1 when dbgFlash is in-flight
+    uint256 private _dbgBorrowed; // principal borrowed in dbgFlash
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -256,8 +260,39 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         }
     }
 
+    // Debug: only test flash capability (no Morpho, no swap). Requires the contract to hold enough
+    // loanToken to pay the Uniswap V3 fee.
+    function dbgFlash(uint256 amount) external onlyAuthorized nonReentrant {
+        require(amount > 0, "amt");
+        _dbgBorrowed = amount;
+        _dbgActive = 1;
+        if (loanIsToken0) {
+            pool.flash(address(this), amount, 0, "");
+        } else {
+            pool.flash(address(this), 0, amount, "");
+        }
+        _dbgActive = 0;
+    }
+
+    // Debug: only test oracle gate
+    function dbgOracle(uint80 prevRoundId) external onlyAuthorized {
+        _enforceOracle(prevRoundId);
+        emit Dbg("oracle_ok", 0, 0);
+    }
+
     function uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata data) external override {
         require(msg.sender == address(pool), "pool");
+
+        // Debug branch: repay principal + fee immediately, no oracle or Morpho calls
+        if (_dbgActive == 1) {
+            uint256 fee = loanIsToken0 ? fee0 : fee1;
+            uint256 owe = _dbgBorrowed + fee;
+            require(loanToken.balanceOf(address(this)) >= owe, "dbg insufficient");
+            _safeTransfer(loanToken, msg.sender, owe);
+            emit Dbg("flash_ok", fee, loanToken.balanceOf(address(this)));
+            return;
+        }
+
         FlashContext memory ctx = abi.decode(data, (FlashContext));
         _enforceOracle(ctx.prevRoundId);
 
@@ -274,6 +309,7 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         if (repayShares > ctx.borrowerShares) repayShares = ctx.borrowerShares;
         require(repayShares > 0, "no shares");
 
+        emit Dbg("liq_before", repayShares, 0);
         (uint256 repaidAssets,) = morpho.liquidate(
             marketParams,
             ctx.borrower,
@@ -281,6 +317,7 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
             repayShares,
             ""
         );
+        emit Dbg("liq_after", repaidAssets, 0);
         require(repaidAssets >= ctx.repayAmount, "repaid < target");
 
         uint256 collateralBalance = collateralToken.balanceOf(address(this));
