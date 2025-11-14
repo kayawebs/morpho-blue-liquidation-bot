@@ -9,6 +9,7 @@ import { metaMorphoAbi } from "./abis/MetaMorpho";
 import { metaMorphoFactoryAbi } from "./abis/MetaMorphoFactory";
 import { morphoBlueAbi } from "./abis/MorphoBlue";
 import { preLiquidationFactoryAbi } from "./abis/PreLiquidationFactory";
+import { chainlinkOcr2Abi } from "./abis/ChainlinkOCR2";
 
 const configs = Object.values(chainConfigs).map((config) => chainConfig(config.chain.id));
 
@@ -139,6 +140,29 @@ export default createConfig({
             startBlock: sb(config.chain.name, config.preLiquidationFactory.startBlock),
           },
         ]),
+      ) as Record<
+        keyof typeof chains,
+        {
+          readonly address: `0x${string}`;
+          readonly startBlock: number;
+        }
+      >,
+    },
+    ChainlinkAggregator: {
+      abi: chainlinkOcr2Abi,
+      chain: Object.fromEntries(
+        configs
+          .map((config) => {
+            const addr =
+              (process.env[`AGGREGATOR_ADDRESS_${config.chain.id}`] as `0x${string}` | undefined) ??
+              (config.chain.id === 8453 ? ("0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8" as `0x${string}`) : undefined);
+            if (!addr) return undefined as unknown as [keyof typeof chains, { address: `0x${string}`; startBlock: number }];
+            return [
+              config.chain.name as keyof typeof chains,
+              { address: addr, startBlock: sb(config.chain.name, 1) },
+            ];
+          })
+          .filter(Boolean) as any,
       ) as Record<
         keyof typeof chains,
         {
