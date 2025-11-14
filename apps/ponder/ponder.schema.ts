@@ -173,6 +173,27 @@ export const preLiquidationPositionRelations = relations(preLiquidationPosition,
 }));
 
 /*//////////////////////////////////////////////////////////////
+                        CHAINLINK TRANSMITS
+//////////////////////////////////////////////////////////////*/
+
+export const oracleTransmission = onchainTable(
+  "oracle_transmission",
+  (t) => ({
+    chainId: t.integer().notNull(),
+    oracleAddr: t.hex().notNull(), // aggregator address
+    roundId: t.integer().notNull(), // uint32 fits in JS number for OCR2
+    answerRaw: t.bigint().notNull(), // int192 stored as bigint
+    blockNumber: t.bigint().notNull(),
+    txHash: t.hex().notNull(),
+    ts: t.bigint().notNull(), // block timestamp (seconds)
+  }),
+  (table) => ({
+    pk: primaryKey({ columns: [table.chainId, table.oracleAddr, table.roundId] }),
+    idxByOracle: index().on(table.chainId, table.oracleAddr, table.blockNumber),
+  }),
+);
+
+/*//////////////////////////////////////////////////////////////
                           VAULTS
 //////////////////////////////////////////////////////////////*/
 

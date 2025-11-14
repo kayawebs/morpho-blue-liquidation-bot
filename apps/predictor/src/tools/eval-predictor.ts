@@ -1,6 +1,6 @@
 import 'dotenv/config';
-import { createPublicClient, http, type Address, getAbiItem } from 'viem';
-import { base } from 'viem/chains';
+import { type Address } from 'viem';
+import pg from 'pg';
 
 // Minimal OCR2 event ABI to fetch NewTransmission logs
 const OCR2_NEW_TRANSMISSION = [
@@ -35,15 +35,7 @@ const AGGREGATOR_V2V3_ABI = [
   },
 ] as const;
 
-type Opts = {
-  chainId: number;
-  aggregator: Address;
-  limit: number;
-  fromBlock?: bigint;
-  toBlock?: bigint;
-  predictorUrl: string;
-  symbol?: string; // fallback when /predictionAt not available
-};
+type Opts = { chainId: number; limit: number; predictorUrl: string };
 
 function getEnv(name: string, def?: string) {
   const v = process.env[name];
@@ -57,14 +49,10 @@ function parseArgs(): Opts {
     const m = a.match(/^--([^=]+)=(.*)$/);
     if (m) args.set(m[1], m[2]);
   }
-  const chainId = Number(args.get('chain') ?? getEnv('EVAL_CHAIN_ID', '8453'));
-  const aggregator = (args.get('aggregator') ?? getEnv('EVAL_AGGREGATOR', '0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8')) as Address;
-  const limit = Number(args.get('limit') ?? getEnv('EVAL_LIMIT', '200'));
-  const predictorUrl = args.get('predictor') ?? getEnv('PREDICTOR_URL', 'http://localhost:48080')!;
-  const symbol = args.get('symbol') ?? getEnv('EVAL_SYMBOL', 'BTCUSDC')!;
-  const fromBlock = args.get('fromBlock') ? BigInt(args.get('fromBlock')!) : undefined;
-  const toBlock = args.get('toBlock') ? BigInt(args.get('toBlock')!) : undefined;
-  return { chainId, aggregator, limit, predictorUrl, symbol, fromBlock, toBlock };
+  const chainId = Number(getEnv('EVAL_CHAIN_ID', '8453'));
+  const limit = Number(getEnv('EVAL_LIMIT', '100'));
+  const predictorUrl = getEnv('PREDICTOR_URL', 'http://localhost:48080')!;
+  return { chainId, limit, predictorUrl };
 }
 
 function quantile(sorted: number[], p: number): number {
@@ -77,7 +65,7 @@ function quantile(sorted: number[], p: number): number {
   return sorted[lo]! * (1 - h) + sorted[hi]! * h;
 }
 
-async function fetchPredictionAt(predictorUrl: string, chainId: number, aggregator: Address, ts: number, fallbackSymbol?: string): Promise<number | undefined> {
+async function fetchPredictionAt(predictorUrl: string, chainId: number, aggregator: Address, ts: number): Promise<number | undefined> {
   try {
     const url = new URL(`/oracles/${chainId}/${aggregator}/predictionAt`, predictorUrl);
     url.searchParams.set('ts', String(ts));
@@ -89,66 +77,35 @@ async function fetchPredictionAt(predictorUrl: string, chainId: number, aggregat
       if (typeof v === 'string') return Number(v);
     }
   } catch {}
-  // Fallback to generic priceAt endpoint by symbol if available
-  if (fallbackSymbol) {
-    try {
-      const url = new URL(`/priceAt/${fallbackSymbol}`, predictorUrl);
-      url.searchParams.set('ts', String(ts));
-      const res = await fetch(url);
-      if (res.ok) {
-        const j = await res.json();
-        const v = (j?.price ?? j?.value) as number | string | undefined;
-        if (typeof v === 'number') return v;
-        if (typeof v === 'string') return Number(v);
-      }
-    } catch {}
-  }
   return undefined;
 }
 
 async function main() {
   const opts = parseArgs();
-  const rpcUrl = getEnv(`RPC_URL_${opts.chainId}`) ?? getEnv('RPC_URL');
-  if (!rpcUrl) throw new Error(`Missing RPC_URL_${opts.chainId} or RPC_URL in env`);
-
-  const client = createPublicClient({ chain: base, transport: http(rpcUrl) });
-
-  // Resolve decimals for scaling answer
-  let decimals = 8;
-  try {
-    decimals = await client.readContract({ address: opts.aggregator, abi: AGGREGATOR_V2V3_ABI, functionName: 'decimals' }) as number;
-  } catch {}
-
-  // Fetch recent NewTransmission logs
-  const eventAbi = getAbiItem({ abi: OCR2_NEW_TRANSMISSION as any, name: 'NewTransmission' });
-  const head = await client.getBlockNumber();
-  const step = 3_000n;
-  const logs: any[] = [];
-  let from = opts.fromBlock ?? (head > 50_000n ? head - 50_000n : 0n);
-  const to = opts.toBlock ?? head;
-  for (let start = to; start >= from && logs.length < opts.limit; start -= step) {
-    const end = start;
-    const begin = start > step ? start - step + 1n : 0n;
-    try {
-      const batch = await client.getLogs({ address: opts.aggregator, event: eventAbi as any, fromBlock: begin, toBlock: end } as any);
-      logs.push(...batch.reverse()); // newest first -> reverse to process latest first
-    } catch {}
-  }
-  logs.splice(opts.limit);
-
-  if (logs.length === 0) {
-    console.log('No transmit logs found in range.');
+  const dbUrl = getEnv('POSTGRES_DATABASE_URL') ?? getEnv('DATABASE_URL') ?? 'postgres://ponder:ponder@localhost:5432/ponder';
+  const pool = new pg.Pool({ connectionString: dbUrl });
+  // Read last up to 100 transmissions from Ponder DB
+  const res = await pool.query(
+    `select chainid as chain_id, oracleaddr as oracle_addr, roundid as round_id, answerraw as answer_raw, ts
+     from oracle_transmission
+     where chainid = $1
+     order by blocknumber desc
+     limit $2`,
+    [opts.chainId, Math.max(1, Math.min(opts.limit, 100))]
+  );
+  if (res.rowCount === 0) {
+    console.log('No transmit rows found in Ponder DB.');
+    await pool.end();
     return;
   }
-
   const samples: { ts: number; round: number; answer: number; predicted?: number; absErr?: number; signedErr?: number }[] = [];
-  for (const l of logs) {
-    const block = await client.getBlock({ blockHash: l.blockHash });
-    const ts = Number(block.timestamp);
-    const answerRaw = (l.args?.answer ?? l.args?.[1]) as bigint;
-    const answer = Number(answerRaw) / Math.pow(10, decimals);
-    const predicted = await fetchPredictionAt(opts.predictorUrl, opts.chainId, opts.aggregator, ts, opts.symbol);
-    const round = Number((l.args?.aggregatorRoundId ?? l.args?.[0]) as bigint ?? 0n);
+  for (const row of res.rows) {
+    const ts = Number(row.ts);
+    const answerRaw = BigInt(row.answer_raw as string | number | bigint);
+    // Assume 8 decimals by default for BTCUSD-like feeds; adjust if your predictor scales differently
+    const answer = Number(answerRaw) / Math.pow(10, 8);
+    const predicted = await fetchPredictionAt(opts.predictorUrl, opts.chainId, row.oracle_addr as Address, ts);
+    const round = Number(row.round_id);
     const s: any = { ts, round, answer, predicted };
     if (typeof predicted === 'number') {
       const signedErr = 10_000 * (predicted - answer) / (answer === 0 ? 1 : answer);
@@ -157,6 +114,7 @@ async function main() {
     }
     samples.push(s);
   }
+  await pool.end();
 
   const ok = samples.filter((s) => typeof s.absErr === 'number') as { absErr: number; signedErr: number }[];
   const coverage = (ok.length / samples.length) * 100;
@@ -170,8 +128,7 @@ async function main() {
   for (const s of samples.slice(0, 5)) {
     console.log(JSON.stringify({ kind: 'sample', ts: s.ts, round: s.round, answer: s.answer, predicted: s.predicted, signedErrBps: s.signedErr, absErrBps: s.absErr }));
   }
-  console.log(JSON.stringify({ kind: 'summary', count: samples.length, havePred: ok.length, coveragePct: Number(coverage.toFixed(2)), p50AbsErrBps: Number(p50?.toFixed?.(3) ?? 'NaN'), p90AbsErrBps: Number(p90?.toFixed?.(3) ?? 'NaN'), biasBps: Number(bias?.toFixed?.(3) ?? 'NaN'), decimals }));
+  console.log(JSON.stringify({ kind: 'summary', count: samples.length, havePred: ok.length, coveragePct: Number(coverage.toFixed(2)), p50AbsErrBps: Number(p50?.toFixed?.(3) ?? 'NaN'), p90AbsErrBps: Number(p90?.toFixed?.(3) ?? 'NaN'), biasBps: Number(bias?.toFixed?.(3) ?? 'NaN') }));
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
-
