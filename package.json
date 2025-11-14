@@ -13,7 +13,8 @@
     "predictor:calibrate": "pnpm --filter @morpho-blue-liquidation-bot/predictor manual-calibrate",
     "scheduler:start": "pnpm --filter @morpho-blue-liquidation-bot/oracle-scheduler start",
     "deploy:guarded": "tsx apps/client/src/deployGuardedLiquidator.ts",
-    "deploy:flash": "tsx apps/client/src/deployFlashLiquidator.ts"
+    "deploy:flash": "tsx apps/client/src/deployFlashLiquidator.ts",
+    "predictor:eval": "tsx apps/predictor/src/tools/eval-predictor.ts --chain=8453 --aggregator=0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8 --symbol=BTCUSDC --limit=200"
   },
   "lint-staged": {
     "*.ts": [
