@@ -588,12 +588,12 @@ async function main() {
           const seizable = new AccrualPosition(iposition, marketObj).seizableCollateral ?? 0n;
           if (seizable > 0n) viable.push({ user, iposition, seizable });
         } catch {}
-        if (viable.length >= liquidators.length) break;
+        if (viable.length >= walletClients.length) break;
       }
       viable.sort((a, b) => (a.seizable === b.seizable ? 0 : a.seizable > b.seizable ? -1 : 1));
-      const selected = viable.slice(0, liquidators.length);
+      const selected = viable.slice(0, walletClients.length);
       // 预清算机会：从 Ponder API 获取（如可用），以减轻本地重计算负担
-      let preLiqSelected: PreLiquidatablePosition[] = [];
+      let preLiqSelected: any[] = [];
       try {
         const res = await fetch(new URL(`/chain/${MARKET.chainId}/liquidatable-positions`, PONDER_API_URL), {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ marketIds: [MARKET.marketId] }),
@@ -606,7 +606,7 @@ async function main() {
             const taken = new Set(selected.map((x) => x.iposition.user.toLowerCase()));
             const sorted = [...entry.positionsPreLiq].sort((a, b) => (a.seizableCollateral === b.seizableCollateral ? 0 : a.seizableCollateral > b.seizableCollateral ? -1 : 1));
             for (const p of sorted) {
-              if (preLiqSelected.length >= liquidators.length) break;
+              if (preLiqSelected.length >= walletClients.length) break;
               if (taken.has(p.user.toLowerCase())) continue;
               preLiqSelected.push(p);
             }
