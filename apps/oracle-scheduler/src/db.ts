@@ -71,9 +71,9 @@ export async function initSchedulerSchema() {
     CREATE TABLE IF NOT EXISTS oracle_schedule_windows (
       chain_id INTEGER NOT NULL,
       oracle_addr TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK (kind IN ('heartbeat','deviation')),
-      start_ts INTEGER NOT NULL,
-      end_ts INTEGER NOT NULL,
+      kind TEXT,
+      start_ts INTEGER,
+      end_ts INTEGER,
       state TEXT,
       delta_bps DOUBLE PRECISION,
       shots_ms JSONB,
@@ -84,6 +84,27 @@ export async function initSchedulerSchema() {
       ON oracle_schedule_windows(chain_id, oracle_addr, start_ts, end_ts);
     CREATE INDEX IF NOT EXISTS idx_oracle_schedule_windows_time
       ON oracle_schedule_windows(oracle_addr, generated_at DESC);
+    -- Backfill/migrate in-place for older tables missing columns
+    ALTER TABLE oracle_schedule_windows
+      ADD COLUMN IF NOT EXISTS kind TEXT,
+      ADD COLUMN IF NOT EXISTS start_ts INTEGER,
+      ADD COLUMN IF NOT EXISTS end_ts INTEGER,
+      ADD COLUMN IF NOT EXISTS state TEXT,
+      ADD COLUMN IF NOT EXISTS delta_bps DOUBLE PRECISION,
+      ADD COLUMN IF NOT EXISTS shots_ms JSONB,
+      ADD COLUMN IF NOT EXISTS params JSONB,
+      ADD COLUMN IF NOT EXISTS generated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+    -- Optional: enforce kind values if column exists
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE table_name='oracle_schedule_windows' AND constraint_type='CHECK'
+      ) THEN
+        ALTER TABLE oracle_schedule_windows
+          ADD CONSTRAINT oracle_schedule_windows_kind_chk
+          CHECK (kind IN ('heartbeat','deviation'));
+      END IF;
+    END $$;
   `);
 }
 
