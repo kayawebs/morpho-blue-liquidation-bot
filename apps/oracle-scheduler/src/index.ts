@@ -4,7 +4,7 @@ import { serve } from '@hono/node-server';
 import { loadSchedulerConfig } from './config.js';
 import { createPublicClient, http, webSocket, getAbiItem } from 'viem';
 import WebSocket, { WebSocketServer } from 'ws';
-import { initSchedulerSchema, insertOutliers } from './db.js';
+import { initSchedulerSchema, insertOutliers, insertWindows } from './db.js';
 
 type RoundEvt = { roundId: number; ts: number; answer: number; block: bigint; txHash?: string };
 type FeedKey = string; // `${chainId}:${aggregator.toLowerCase()}`
@@ -293,6 +293,39 @@ async function broadcastNextWindow(feed: { chainId: number; aggregator: string }
   const payload = JSON.stringify({ type: 'update', feed: key, ts: Math.floor(Date.now() / 1000), data: next });
   if (lastNext[key] === payload) return;
   lastNext[key] = payload;
+  // Persist windows snapshot for later evaluation
+  try {
+    const rows: any[] = [];
+    if (next.heartbeat && Number.isFinite(next.heartbeat.start) && Number.isFinite(next.heartbeat.end)) {
+      rows.push({
+        chainId: feed.chainId,
+        oracleAddr: feed.aggregator,
+        kind: 'heartbeat',
+        startTs: Math.floor(next.heartbeat.start),
+        endTs: Math.floor(next.heartbeat.end),
+        state: null,
+        deltaBps: null,
+        shotsMs: null,
+        params: { heartbeatSeconds: heartbeat, offsetBps, lagSeconds },
+      });
+    }
+    if (next.deviation && Number.isFinite(next.deviation.start) && Number.isFinite(next.deviation.end)) {
+      rows.push({
+        chainId: feed.chainId,
+        oracleAddr: feed.aggregator,
+        kind: 'deviation',
+        startTs: Math.floor(next.deviation.start),
+        endTs: Math.floor(next.deviation.end),
+        state: next.deviation.state ?? null,
+        deltaBps: Number.isFinite(next.deviation.deltaBps) ? Number(next.deviation.deltaBps) : null,
+        shotsMs: Array.isArray(next.deviation.shotsMs) ? next.deviation.shotsMs : null,
+        params: { heartbeatSeconds: heartbeat, offsetBps, lagSeconds },
+      });
+    }
+    if (rows.length > 0) await insertWindows(rows);
+  } catch (e) {
+    console.warn('persist windows failed:', (e as any)?.message ?? e);
+  }
   const listeners = subs[key];
   if (!listeners || listeners.size === 0) return;
   for (const ws of listeners) {

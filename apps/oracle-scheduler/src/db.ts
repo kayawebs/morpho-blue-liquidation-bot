@@ -16,6 +16,18 @@ export interface OutlierRow {
   details?: Record<string, unknown>;
 }
 
+export interface WindowRow {
+  chainId: number;
+  oracleAddr: string;
+  kind: 'heartbeat' | 'deviation';
+  startTs: number;
+  endTs: number;
+  state?: string | null; // for deviation: forecast/boost/commit
+  deltaBps?: number | null;
+  shotsMs?: number[] | null;
+  params?: Record<string, unknown> | null; // e.g., { heartbeatSeconds, offsetBps, lagSeconds }
+}
+
 function resolvePredictorDbUrl(): string | undefined {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
@@ -55,6 +67,23 @@ export async function initSchedulerSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_oracle_timing_outliers_ts
       ON oracle_timing_outliers(oracle_addr, event_ts DESC);
+
+    CREATE TABLE IF NOT EXISTS oracle_schedule_windows (
+      chain_id INTEGER NOT NULL,
+      oracle_addr TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('heartbeat','deviation')),
+      start_ts INTEGER NOT NULL,
+      end_ts INTEGER NOT NULL,
+      state TEXT,
+      delta_bps DOUBLE PRECISION,
+      shots_ms JSONB,
+      params JSONB,
+      generated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_oracle_schedule_windows_key
+      ON oracle_schedule_windows(chain_id, oracle_addr, start_ts, end_ts);
+    CREATE INDEX IF NOT EXISTS idx_oracle_schedule_windows_time
+      ON oracle_schedule_windows(oracle_addr, generated_at DESC);
   `);
 }
 
@@ -89,6 +118,33 @@ export async function insertOutliers(rows: OutlierRow[]) {
       delta_bps = EXCLUDED.delta_bps,
       details = EXCLUDED.details,
       created_at = now();
+  `;
+  await pool.query(sql, params);
+}
+
+export async function insertWindows(rows: WindowRow[]) {
+  if (!pool || rows.length === 0) return;
+  const values: string[] = [];
+  const params: any[] = [];
+  let i = 1;
+  for (const r of rows) {
+    values.push(`($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`);
+    params.push(
+      r.chainId,
+      r.oracleAddr.toLowerCase(),
+      r.kind,
+      Math.floor(r.startTs),
+      Math.floor(r.endTs),
+      r.state ?? null,
+      r.deltaBps ?? null,
+      r.shotsMs ? JSON.stringify(r.shotsMs) : null,
+      r.params ? JSON.stringify(r.params) : null,
+    );
+  }
+  const sql = `
+    INSERT INTO oracle_schedule_windows
+      (chain_id, oracle_addr, kind, start_ts, end_ts, state, delta_bps, shots_ms, params)
+    VALUES ${values.join(',')}
   `;
   await pool.query(sql, params);
 }
