@@ -1,10 +1,26 @@
 import 'dotenv/config';
 import pg from 'pg';
 import { loadSchedulerConfig } from '../config.js';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync, readFileSync } from 'node:fs';
 
 function getEnv(name: string, def?: string) {
   const v = process.env[name];
   return v && v.trim() !== '' ? v.trim() : def;
+}
+
+function resolvePredictorDbUrl(): string | undefined {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const p = resolve(here, '..', '..', 'predictor', 'config.json');
+    if (!existsSync(p)) return undefined;
+    const raw = readFileSync(p, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed?.db?.url ? String(parsed.db.url) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function quantile(sorted: number[], p: number) {
@@ -28,14 +44,12 @@ async function main() {
   const chainId = feed.chainId;
   const oracle = feed.aggregator.toLowerCase();
 
-  // Connect to Predictor DB for windows
-  const schedUrl = getEnv('SCHED_DB_URL') || getEnv('PREDICTOR_DB_URL') || getEnv('DATABASE_URL');
-  if (!schedUrl) throw new Error('Missing scheduler DB URL (SCHED_DB_URL/PREDICTOR_DB_URL/DATABASE_URL)');
+  // Connect to Predictor DB for windows (auto-resolve from predictor/config.json if env unset)
+  const schedUrl = getEnv('SCHED_DB_URL') || getEnv('PREDICTOR_DB_URL') || getEnv('DATABASE_URL') || resolvePredictorDbUrl() || 'postgres://ponder:ponder@localhost:5432/ponder';
   const poolA = new pg.Pool({ connectionString: schedUrl });
 
   // Connect to Ponder DB for transmits
-  const ponderUrl = getEnv('POSTGRES_DATABASE_URL') || getEnv('DATABASE_URL');
-  if (!ponderUrl) throw new Error('Missing Ponder DB URL (POSTGRES_DATABASE_URL/DATABASE_URL)');
+  const ponderUrl = getEnv('POSTGRES_DATABASE_URL') || getEnv('DATABASE_URL') || 'postgres://ponder:ponder@localhost:5432/ponder';
   const ponderSchema = getEnv('PONDER_DB_SCHEMA') || getEnv('DATABASE_SCHEMA') || 'mblb_ponder';
   const poolB = new pg.Pool({ connectionString: ponderUrl });
 
@@ -114,4 +128,3 @@ async function main() {
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
-
