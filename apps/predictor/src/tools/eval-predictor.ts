@@ -87,10 +87,10 @@ async function main() {
   const pool = new pg.Pool({ connectionString: dbUrl });
   // Read last up to 100 transmissions from Ponder DB
   const limit = Math.max(1, Math.min(opts.limit, 100));
-  const sql = `select chainid as chain_id, oracleaddr as oracle_addr, roundid as round_id, answerraw as answer_raw, ts
+  const sql = `select chain_id, oracle_addr, round_id, answer_raw, ts
                from ${schema}.oracle_transmission
-               where chainid = $1
-               order by blocknumber desc
+               where chain_id = $1
+               order by block_number desc
                limit $2`;
   const res = await pool.query(sql, [opts.chainId, limit]);
   if (res.rowCount === 0) {
