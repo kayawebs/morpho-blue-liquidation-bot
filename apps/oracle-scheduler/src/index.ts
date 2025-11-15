@@ -244,6 +244,8 @@ async function fetchNextWindow(chainId: number, agg: string, heartbeat: number, 
   const hbJitterEnd = typeof jit.p90 === 'number' && Number.isFinite(jit.p90) ? jit.p90 : HEARTBEAT_SLACK;
   const hbStart = last.ts + heartbeat + hbJitterStart;
   const hbEnd = last.ts + heartbeat + hbJitterEnd;
+  const hbStartMs = Math.floor(hbStart * 1000);
+  const hbEndMs = Math.floor(hbEnd * 1000);
   // Deviation window + aggressive shots plan
   const fit = await getFitSummary(chainId, agg);
   const p90 = Math.max(0, Math.min(offsetBps, Number(fit?.p90AbsBps ?? 5)));
@@ -267,23 +269,25 @@ async function fetchNextWindow(chainId: number, agg: string, heartbeat: number, 
     const nowMs = Date.now();
     if (dNow >= T3) {
       for (const dt of [-20, 20, 60]) { const t = nowMs + dt; if (t > nowMs) shotsMs.push(t); }
-      devWin = { start: nowSec - 1, end: nowSec + 3, state: 'commit', deltaBps: dNow, shotsMs };
+      devWin = { start: nowSec - 1, end: nowSec + 3, startMs: nowMs - 1000, endMs: nowMs + 3000, state: 'commit', deltaBps: dNow, shotsMs };
     } else if (dNow >= T2) {
       for (const dt of [20, 60, 100]) shotsMs.push(nowMs + dt);
-      devWin = { start: nowSec, end: nowSec + 5, state: 'boost', deltaBps: dNow, shotsMs };
+      devWin = { start: nowSec, end: nowSec + 5, startMs: nowMs, endMs: nowMs + 5000, state: 'boost', deltaBps: dNow, shotsMs };
     } else if (dNow >= T1) {
       for (const dt of [60, 120]) shotsMs.push(nowMs + dt);
-      devWin = { start: nowSec, end: nowSec + 10, state: 'prewarm', deltaBps: dNow, shotsMs };
+      devWin = { start: nowSec, end: nowSec + 10, startMs: nowMs, endMs: nowMs + 10000, state: 'prewarm', deltaBps: dNow, shotsMs };
     } else {
       const rem1 = Math.max(0, T1 - dNow);
       const rem2 = Math.max(0, T2 - dNow);
       const t1 = nowSec + Math.round(tau(rem1));
       const t2 = nowSec + Math.round(tau(rem2));
       const lead = st.profiles.deviation?.leadSec ?? {};
-      devWin = { start: t1, end: t2 + (lead.p50 ?? 3), state: 'forecast', deltaBps: dNow, shotsMs };
+      const t1ms = nowMs + Math.round(tau(rem1) * 1000);
+      const t2ms = nowMs + Math.round((t2 - nowSec) * 1000) + Math.round(((lead.p50 ?? 3) as number) * 1000);
+      devWin = { start: t1, end: t2 + (lead.p50 ?? 3), startMs: t1ms, endMs: t2ms, state: 'forecast', deltaBps: dNow, shotsMs };
     }
   }
-  return { heartbeat: { start: hbStart, end: hbEnd }, deviation: devWin };
+  return { heartbeat: { start: hbStart, end: hbEnd, startMs: hbStartMs, endMs: hbEndMs }, deviation: devWin };
 }
 
 async function broadcastNextWindow(feed: { chainId: number; aggregator: string }, heartbeat: number, offsetBps: number, lagSeconds: number) {
@@ -303,6 +307,8 @@ async function broadcastNextWindow(feed: { chainId: number; aggregator: string }
         kind: 'heartbeat',
         startTs: Math.floor(next.heartbeat.start),
         endTs: Math.floor(next.heartbeat.end),
+        startMs: Number.isFinite(next.heartbeat.startMs) ? Math.floor(next.heartbeat.startMs) : null,
+        endMs: Number.isFinite(next.heartbeat.endMs) ? Math.floor(next.heartbeat.endMs) : null,
         state: null,
         deltaBps: null,
         shotsMs: null,
@@ -316,6 +322,8 @@ async function broadcastNextWindow(feed: { chainId: number; aggregator: string }
         kind: 'deviation',
         startTs: Math.floor(next.deviation.start),
         endTs: Math.floor(next.deviation.end),
+        startMs: Number.isFinite(next.deviation.startMs) ? Math.floor(next.deviation.startMs) : null,
+        endMs: Number.isFinite(next.deviation.endMs) ? Math.floor(next.deviation.endMs) : null,
         state: next.deviation.state ?? null,
         deltaBps: Number.isFinite(next.deviation.deltaBps) ? Number(next.deviation.deltaBps) : null,
         shotsMs: Array.isArray(next.deviation.shotsMs) ? next.deviation.shotsMs : null,

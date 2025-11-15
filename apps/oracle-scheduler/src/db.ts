@@ -22,6 +22,8 @@ export interface WindowRow {
   kind: 'heartbeat' | 'deviation';
   startTs: number;
   endTs: number;
+  startMs?: number | null;
+  endMs?: number | null;
   state?: string | null; // for deviation: forecast/boost/commit
   deltaBps?: number | null;
   shotsMs?: number[] | null;
@@ -74,6 +76,8 @@ export async function initSchedulerSchema() {
       kind TEXT,
       start_ts INTEGER,
       end_ts INTEGER,
+      start_ms BIGINT,
+      end_ms BIGINT,
       state TEXT,
       delta_bps DOUBLE PRECISION,
       shots_ms JSONB,
@@ -89,6 +93,8 @@ export async function initSchedulerSchema() {
       ADD COLUMN IF NOT EXISTS kind TEXT,
       ADD COLUMN IF NOT EXISTS start_ts INTEGER,
       ADD COLUMN IF NOT EXISTS end_ts INTEGER,
+      ADD COLUMN IF NOT EXISTS start_ms BIGINT,
+      ADD COLUMN IF NOT EXISTS end_ms BIGINT,
       ADD COLUMN IF NOT EXISTS state TEXT,
       ADD COLUMN IF NOT EXISTS delta_bps DOUBLE PRECISION,
       ADD COLUMN IF NOT EXISTS shots_ms JSONB,
@@ -149,13 +155,15 @@ export async function insertWindows(rows: WindowRow[]) {
   const params: any[] = [];
   let i = 1;
   for (const r of rows) {
-    values.push(`($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`);
+    values.push(`($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`);
     params.push(
       r.chainId,
       r.oracleAddr.toLowerCase(),
       r.kind,
       Math.floor(r.startTs),
       Math.floor(r.endTs),
+      r.startMs != null ? Math.floor(r.startMs) : null,
+      r.endMs != null ? Math.floor(r.endMs) : null,
       r.state ?? null,
       r.deltaBps ?? null,
       r.shotsMs ? JSON.stringify(r.shotsMs) : null,
@@ -164,7 +172,7 @@ export async function insertWindows(rows: WindowRow[]) {
   }
   const sql = `
     INSERT INTO oracle_schedule_windows
-      (chain_id, oracle_addr, kind, start_ts, end_ts, state, delta_bps, shots_ms, params)
+      (chain_id, oracle_addr, kind, start_ts, end_ts, start_ms, end_ms, state, delta_bps, shots_ms, params)
     VALUES ${values.join(',')}
   `;
   await pool.query(sql, params);

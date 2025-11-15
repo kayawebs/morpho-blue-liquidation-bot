@@ -97,20 +97,26 @@ async function main() {
   const minTs = transmits[0]!.ts - 3600; // 1h cushion
   // Fetch recent windows
   const winRes = await poolA.query(
-    `select kind, start_ts, end_ts, extract(epoch from generated_at)::int as gen_ts
+    `select kind, start_ts, end_ts, start_ms, end_ms, extract(epoch from generated_at)::int as gen_ts
      from oracle_schedule_windows
      where chain_id = $1 and lower(oracle_addr) = lower($2) and end_ts >= $3
      order by generated_at desc limit 1000`,
     [chainId, oracle, minTs]
   );
-  const windows = winRes.rows.map((r) => ({ kind: String(r.kind), start: Number(r.start_ts), end: Number(r.end_ts), gen: Number(r.gen_ts) }));
+  const windows = winRes.rows.map((r) => ({ kind: String(r.kind), start: Number(r.start_ts), end: Number(r.end_ts), startMs: r.start_ms != null ? Number(r.start_ms) : null, endMs: r.end_ms != null ? Number(r.end_ms) : null, gen: Number(r.gen_ts) }));
 
   const heartbeats = windows.filter((w) => w.kind === 'heartbeat');
   const deviations = windows.filter((w) => w.kind === 'deviation');
 
-  function coveredBy(ts: number, arr: { start: number; end: number; gen?: number }[]) {
-    // Strict: only count windows generated at or before the transmit
-    return arr.some((w) => (w.gen ? w.gen <= ts : true) && ts >= w.start && ts <= w.end);
+  function coveredBy(ts: number, arr: { start: number; end: number; startMs?: number|null; endMs?: number|null; gen?: number }[]) {
+    // prefer ms windows if available
+    const tsMs = ts * 1000;
+    return arr.some((w) => {
+      const okGen = w.gen ? w.gen <= ts : true;
+      if (!okGen) return false;
+      if (w.startMs != null && w.endMs != null) return tsMs >= w.startMs && tsMs <= w.endMs;
+      return ts >= w.start && ts <= w.end;
+    });
   }
 
   let coveredOverall = 0, coveredHb = 0, coveredDev = 0;
@@ -125,9 +131,14 @@ async function main() {
     if (!byAny && misses.length < 10) misses.push({ round: t.round, ts: t.ts });
   }
 
-  function widths(arr: { start: number; end: number }[]) {
-    const ws = arr.map((w) => w.end - w.start).filter((x) => Number.isFinite(x) && x >= 0).sort((a,b)=>a-b);
-    return { p50: quantile(ws, 0.5), p90: quantile(ws, 0.9) };
+  function widths(arr: { start: number; end: number; startMs?: number|null; endMs?: number|null }[]) {
+    const wsSec: number[] = [];
+    for (const w of arr) {
+      if (w.startMs != null && w.endMs != null) wsSec.push((w.endMs - w.startMs) / 1000);
+      else wsSec.push(w.end - w.start);
+    }
+    const sorted = wsSec.filter((x)=>Number.isFinite(x) && x >= 0).sort((a,b)=>a-b);
+    return { p50: quantile(sorted, 0.5), p90: quantile(sorted, 0.9) };
   }
   const wAll = widths(windows);
   const wHb = widths(heartbeats);
