@@ -83,16 +83,16 @@ async function fetchPredictionAt(predictorUrl: string, chainId: number, aggregat
 async function main() {
   const opts = parseArgs();
   const dbUrl = getEnv('POSTGRES_DATABASE_URL') ?? getEnv('DATABASE_URL') ?? 'postgres://ponder:ponder@localhost:5432/ponder';
+  const schema = getEnv('PONDER_DB_SCHEMA') ?? getEnv('DATABASE_SCHEMA') ?? 'mblb_ponder';
   const pool = new pg.Pool({ connectionString: dbUrl });
   // Read last up to 100 transmissions from Ponder DB
-  const res = await pool.query(
-    `select chainid as chain_id, oracleaddr as oracle_addr, roundid as round_id, answerraw as answer_raw, ts
-     from oracle_transmission
-     where chainid = $1
-     order by blocknumber desc
-     limit $2`,
-    [opts.chainId, Math.max(1, Math.min(opts.limit, 100))]
-  );
+  const limit = Math.max(1, Math.min(opts.limit, 100));
+  const sql = `select chainid as chain_id, oracleaddr as oracle_addr, roundid as round_id, answerraw as answer_raw, ts
+               from ${schema}.oracle_transmission
+               where chainid = $1
+               order by blocknumber desc
+               limit $2`;
+  const res = await pool.query(sql, [opts.chainId, limit]);
   if (res.rowCount === 0) {
     console.log('No transmit rows found in Ponder DB.');
     await pool.end();
