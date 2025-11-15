@@ -48,6 +48,33 @@ async function main() {
   const schedUrl = getEnv('SCHED_DB_URL') || getEnv('PREDICTOR_DB_URL') || getEnv('DATABASE_URL') || resolvePredictorDbUrl() || 'postgres://ponder:ponder@localhost:5432/ponder';
   const poolA = new pg.Pool({ connectionString: schedUrl });
 
+  // Ensure windows table has required columns (self-migration for eval)
+  await poolA.query(`
+    CREATE TABLE IF NOT EXISTS oracle_schedule_windows (
+      chain_id INTEGER,
+      oracle_addr TEXT,
+      kind TEXT,
+      start_ts INTEGER,
+      end_ts INTEGER,
+      state TEXT,
+      delta_bps DOUBLE PRECISION,
+      shots_ms JSONB,
+      params JSONB,
+      generated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    ALTER TABLE oracle_schedule_windows
+      ADD COLUMN IF NOT EXISTS chain_id INTEGER,
+      ADD COLUMN IF NOT EXISTS oracle_addr TEXT,
+      ADD COLUMN IF NOT EXISTS kind TEXT,
+      ADD COLUMN IF NOT EXISTS start_ts INTEGER,
+      ADD COLUMN IF NOT EXISTS end_ts INTEGER,
+      ADD COLUMN IF NOT EXISTS state TEXT,
+      ADD COLUMN IF NOT EXISTS delta_bps DOUBLE PRECISION,
+      ADD COLUMN IF NOT EXISTS shots_ms JSONB,
+      ADD COLUMN IF NOT EXISTS params JSONB,
+      ADD COLUMN IF NOT EXISTS generated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+  `);
+
   // Connect to Ponder DB for transmits
   const ponderUrl = getEnv('POSTGRES_DATABASE_URL') || getEnv('DATABASE_URL') || 'postgres://ponder:ponder@localhost:5432/ponder';
   const ponderSchema = getEnv('PONDER_DB_SCHEMA') || getEnv('DATABASE_SCHEMA') || 'mblb_ponder';
