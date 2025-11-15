@@ -70,18 +70,19 @@ async function main() {
   const minTs = transmits[0]!.ts - 3600; // 1h cushion
   // Fetch recent windows
   const winRes = await poolA.query(
-    `select kind, start_ts, end_ts from oracle_schedule_windows
+    `select kind, start_ts, end_ts, extract(epoch from generated_at)::int as gen_ts
      where chain_id = $1 and lower(oracle_addr) = lower($2) and end_ts >= $3
      order by generated_at desc limit 1000`,
     [chainId, oracle, minTs]
   );
-  const windows = winRes.rows.map((r) => ({ kind: String(r.kind), start: Number(r.start_ts), end: Number(r.end_ts) }));
+  const windows = winRes.rows.map((r) => ({ kind: String(r.kind), start: Number(r.start_ts), end: Number(r.end_ts), gen: Number(r.gen_ts) }));
 
   const heartbeats = windows.filter((w) => w.kind === 'heartbeat');
   const deviations = windows.filter((w) => w.kind === 'deviation');
 
-  function coveredBy(ts: number, arr: { start: number; end: number }[]) {
-    return arr.some((w) => ts >= w.start && ts <= w.end);
+  function coveredBy(ts: number, arr: { start: number; end: number; gen?: number }[]) {
+    // Strict: only count windows generated at or before the transmit
+    return arr.some((w) => (w.gen ? w.gen <= ts : true) && ts >= w.start && ts <= w.end);
   }
 
   let coveredOverall = 0, coveredHb = 0, coveredDev = 0;
