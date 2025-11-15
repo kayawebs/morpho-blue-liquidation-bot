@@ -72,7 +72,7 @@ async function fetchPredictionAt(predictorUrl: string, chainId: number, aggregat
     const res = await fetch(url);
     if (res.ok) {
       const j = await res.json();
-      const v = (j?.predicted ?? j?.price ?? j?.value) as number | string | undefined;
+      const v = (j?.answer ?? j?.predicted ?? j?.price ?? j?.value) as number | string | undefined;
       if (typeof v === 'number') return v;
       if (typeof v === 'string') return Number(v);
     }
