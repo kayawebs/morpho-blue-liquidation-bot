@@ -98,6 +98,7 @@ async function main() {
   // Fetch recent windows
   const winRes = await poolA.query(
     `select kind, start_ts, end_ts, extract(epoch from generated_at)::int as gen_ts
+     from oracle_schedule_windows
      where chain_id = $1 and lower(oracle_addr) = lower($2) and end_ts >= $3
      order by generated_at desc limit 1000`,
     [chainId, oracle, minTs]
