@@ -16,7 +16,7 @@ const lastNext: Record<FeedKey, string> = {};
 const PREDICTOR_URL = process.env.PREDICTOR_URL ?? 'http://localhost:48080';
 const BOOT_LOOKBACK_BLOCKS = BigInt(process.env.SCHED_BOOT_LOOKBACK_BLOCKS ?? '48000');
 const BOOT_CHUNK_BLOCKS = BigInt(process.env.SCHED_BOOT_CHUNK_BLOCKS ?? '4000');
-const REFRESH_INTERVAL_MS = Number(process.env.SCHED_REFRESH_INTERVAL ?? 3000);
+const REFRESH_INTERVAL_MS = Number(process.env.SCHED_REFRESH_INTERVAL ?? 800);
 const HEARTBEAT_SLACK = Number(process.env.SCHED_HEARTBEAT_SLACK ?? 90);
 
 function makeFeedKey(chainId: number, agg: string): FeedKey {
@@ -255,6 +255,7 @@ async function fetchNextWindow(chainId: number, agg: string, heartbeat: number, 
   const T3 = Math.max(1, offsetBps - 1);
 
   const nowSec = Math.floor(Date.now()/1000);
+  const nowMs = Date.now();
   const predNow = await fetchPredictedAt(chainId, agg, nowSec, lagSeconds);
   const predPrev = await fetchPredictedAt(chainId, agg, nowSec - 1, lagSeconds);
   const aPrev = last.answer;
@@ -285,6 +286,20 @@ async function fetchNextWindow(chainId: number, agg: string, heartbeat: number, 
       const t1ms = nowMs + Math.round(tau(rem1) * 1000);
       const t2ms = nowMs + Math.round((t2 - nowSec) * 1000) + Math.round(((lead.p50 ?? 3) as number) * 1000);
       devWin = { start: t1, end: t2 + (lead.p50 ?? 3), startMs: t1ms, endMs: t2ms, state: 'forecast', deltaBps: dNow, shotsMs };
+    }
+  }
+  // Ensure a minimum forecast window when far from threshold
+  const MIN_DEV_FORECAST_SEC = Number(process.env.SCHED_MIN_DEV_FORECAST_SEC ?? 30);
+  if (!devWin) {
+    devWin = { start: nowSec, end: nowSec + MIN_DEV_FORECAST_SEC, startMs: nowMs, endMs: nowMs + MIN_DEV_FORECAST_SEC * 1000, state: 'forecast', deltaBps: 0, shotsMs: [] };
+  } else {
+    const sMs = devWin.startMs ?? (devWin.start * 1000);
+    const eMs = devWin.endMs ?? (devWin.end * 1000);
+    const minSpanMs = MIN_DEV_FORECAST_SEC * 1000;
+    if (eMs - sMs < minSpanMs) {
+      devWin.endMs = sMs + minSpanMs;
+      devWin.end = Math.ceil(devWin.endMs / 1000);
+      if (!devWin.state) devWin.state = 'forecast';
     }
   }
   return { heartbeat: { start: hbStart, end: hbEnd, startMs: hbStartMs, endMs: hbEndMs }, deviation: devWin };

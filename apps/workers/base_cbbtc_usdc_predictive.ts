@@ -160,7 +160,24 @@ async function main() {
   });
   ws.on("close", () => console.log("⚠️ scheduler WS 断开，等待重连(由系统自动)"));
   ws.on("error", () => {});
-  let lastRoundId: bigint | null = null;
+let lastRoundId: bigint | null = null;
+const REQUESTED_REPAY_USDC: bigint = 50_000_000n; // 50 USDC in 6 decimals
+
+async function getPrevOrCurrentRoundId(): Promise<bigint> {
+  const round = (await readContract(publicClient as any, {
+    address: MARKET.aggregator,
+    abi: AGGREGATOR_V2V3_ABI,
+    functionName: "latestRoundData",
+  })) as [bigint, bigint, bigint, bigint, bigint];
+  const current = BigInt(round[0]);
+  if (lastRoundId !== null && current > lastRoundId) {
+    const prev = lastRoundId;
+    lastRoundId = current;
+    return prev;
+  }
+  if (lastRoundId === null) lastRoundId = current;
+  return current;
+}
 
   async function fetchBorrowShares(user: Address): Promise<bigint> {
     const [, borrowShares] = (await readContract(publicClient as any, {
@@ -191,19 +208,23 @@ async function main() {
     return prev;
   }
 
-  // 主循环：按照 scheduler shots 触发（200ms 精度）
+  // 主循环：窗口内每 200ms 尝试（若 scheduler 有 shots 按 shots，否则依据当前窗口时段）
   setInterval(async () => {
     const nowMs = Date.now();
-    if (shotQueue.length === 0) return;
-    if (shotQueue[0]! > nowMs) return;
-    const due: number[] = [];
-    while (shotQueue.length && shotQueue[0]! <= nowMs + 10) due.push(shotQueue.shift()!);
-    if (due.length === 0) return;
-
-    const prevRoundId = await fetchPrevRoundId();
-    if (prevRoundId === null) {
-      return;
+    let shouldFire = false;
+    if (shotQueue.length && shotQueue[0]! <= nowMs + 10) {
+      shouldFire = true;
+      while (shotQueue.length && shotQueue[0]! <= nowMs + 10) shotQueue.shift();
+    } else if (latest) {
+      const dev = (latest as any).deviation;
+      const hb = (latest as any).heartbeat;
+      const inDev = dev && typeof dev.start === 'number' && typeof dev.end === 'number' && Math.floor(nowMs/1000) >= dev.start && Math.floor(nowMs/1000) <= dev.end;
+      const inHb = hb && typeof hb.start === 'number' && typeof hb.end === 'number' && Math.floor(nowMs/1000) >= hb.start && Math.floor(nowMs/1000) <= hb.end;
+      shouldFire = Boolean(inDev || inHb);
     }
+    if (!shouldFire) return;
+
+    const prevRoundId = await getPrevOrCurrentRoundId();
 
     const batch = pickBatch();
     if (batch.length === 0) return;
@@ -229,7 +250,7 @@ async function main() {
             address: flashLiquidator,
             abi: FLASH_LIQUIDATOR_ABI,
             functionName: "flashLiquidate",
-            args: [borrower, 0n, prevRoundId, minProfitDefault],
+            args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
           });
           console.log(`⚡ ${exec.label} 清算 ${borrower} tx=${hash}`);
         } catch (error) {
