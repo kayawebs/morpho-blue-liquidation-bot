@@ -13,6 +13,7 @@
     "predictor:calibrate": "pnpm --filter @morpho-blue-liquidation-bot/predictor manual-calibrate",
     "scheduler:start": "pnpm --filter @morpho-blue-liquidation-bot/oracle-scheduler start",
     "scheduler:eval": "tsx apps/oracle-scheduler/src/tools/eval-scheduler.ts",
+    "scheduler:watch:pending": "tsx apps/oracle-scheduler/src/tools/watch-pending-transmit.ts",
     "deploy:guarded": "tsx apps/client/src/deployGuardedLiquidator.ts",
     "deploy:flash": "tsx apps/client/src/deployFlashLiquidator.ts",
     "predictor:eval": "tsx apps/predictor/src/tools/eval-predictor.ts"
