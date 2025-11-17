@@ -6,6 +6,7 @@ import {
   authorization,
   preLiquidationContract,
   preLiquidationPosition,
+  liquidation,
 } from "ponder:schema";
 
 import { zeroFloorSub } from "./utils";
@@ -639,6 +640,27 @@ ponder.on("Morpho:Liquidate", async ({ event, context }) => {
               collateral: p.collateral,
             }));
         } catch {}
+      }
+    })(),
+    // Persist liquidation event row for analytics
+    (async () => {
+      try {
+        await context.db.insert(liquidation).values({
+          chainId: context.chain.id,
+          marketId: event.args.id,
+          borrower: event.args.borrower,
+          repaidAssets: event.args.repaidAssets,
+          repaidShares: event.args.repaidShares,
+          seizedAssets: event.args.seizedAssets,
+          badDebtAssets: event.args.badDebtAssets,
+          badDebtShares: event.args.badDebtShares,
+          txHash: event.transaction.hash,
+          blockNumber: event.block.number,
+          ts: event.block.timestamp,
+          liquidator: (event.transaction as any).from ?? (event.log as any).address, // from should be present
+        });
+      } catch {
+        /* ignore insert races */
       }
     })(),
   ]);

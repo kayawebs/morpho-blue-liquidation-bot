@@ -194,6 +194,37 @@ export const oracleTransmission = onchainTable(
 );
 
 /*//////////////////////////////////////////////////////////////
+                          LIQUIDATIONS
+//////////////////////////////////////////////////////////////*/
+
+export const liquidation = onchainTable(
+  "liquidation",
+  (t) => ({
+    chainId: t.integer().notNull(),
+    marketId: t.hex().notNull(),
+    borrower: t.hex().notNull(),
+
+    // event data
+    repaidAssets: t.bigint().notNull().default(0n),
+    repaidShares: t.bigint().notNull().default(0n),
+    seizedAssets: t.bigint().notNull().default(0n),
+    badDebtAssets: t.bigint().notNull().default(0n),
+    badDebtShares: t.bigint().notNull().default(0n),
+
+    // provenance
+    txHash: t.hex().notNull(),
+    blockNumber: t.bigint().notNull(),
+    ts: t.bigint().notNull(),
+    liquidator: t.hex().notNull(),
+  }),
+  (table) => ({
+    pk: primaryKey({ columns: [table.chainId, table.txHash] }),
+    idxByMarket: index().on(table.chainId, table.marketId, table.blockNumber),
+    idxByBorrower: index().on(table.chainId, table.borrower, table.blockNumber),
+  }),
+);
+
+/*//////////////////////////////////////////////////////////////
                           VAULTS
 //////////////////////////////////////////////////////////////*/
 

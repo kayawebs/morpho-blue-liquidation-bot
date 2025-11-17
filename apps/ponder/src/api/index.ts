@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, client, eq, inArray, graphql, gt, replaceBigInts as replaceBigIntsBase } from "ponder";
+import { and, client, eq, inArray, graphql, gt, gte, desc, replaceBigInts as replaceBigIntsBase } from "ponder";
 import { db, publicClients } from "ponder:api";
 import schema from "ponder:schema";
 import type { Address, Hex } from "viem";
@@ -186,6 +186,87 @@ app.post("/chain/:chainId/positions", async (c) => {
   }
 
   return c.json(replaceBigInts({ results }));
+});
+
+// Recent liquidations for a chain (optional window & limit)
+app.get("/chain/:chainId/liquidations/recent", async (c) => {
+  const { chainId: chainIdRaw } = c.req.param();
+  const url = new URL(c.req.url);
+  const hours = Number(url.searchParams.get("hours") ?? "24");
+  const limit = Number(url.searchParams.get("limit") ?? "200");
+  const chainId = Number.parseInt(chainIdRaw, 10);
+
+  const since = BigInt(Math.floor(Date.now() / 1000) - Math.max(1, hours) * 3600);
+  const rows = await db
+    .select({
+      marketId: schema.liquidation.marketId,
+      borrower: schema.liquidation.borrower,
+      liquidator: schema.liquidation.liquidator,
+      repaidAssets: schema.liquidation.repaidAssets,
+      repaidShares: schema.liquidation.repaidShares,
+      seizedAssets: schema.liquidation.seizedAssets,
+      badDebtAssets: schema.liquidation.badDebtAssets,
+      badDebtShares: schema.liquidation.badDebtShares,
+      txHash: schema.liquidation.txHash,
+      ts: schema.liquidation.ts,
+      blockNumber: schema.liquidation.blockNumber,
+    })
+    .from(schema.liquidation)
+    .where(and(eq(schema.liquidation.chainId, chainId), gte(schema.liquidation.ts, since)))
+    .orderBy(desc(schema.liquidation.ts))
+    .limit(Math.max(1, Math.min(1000, isNaN(limit) ? 200 : limit)));
+
+  return c.json(replaceBigInts({ items: rows }));
+});
+
+// Liquidation summary: total / ours / missed in window
+app.get("/chain/:chainId/liquidations/summary", async (c) => {
+  const { chainId: chainIdRaw } = c.req.param();
+  const url = new URL(c.req.url);
+  const hours = Number(url.searchParams.get("hours") ?? "24");
+  const chainId = Number.parseInt(chainIdRaw, 10);
+
+  // Collect our liquidator addresses from env
+  const ours = new Set<string>();
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!v) continue;
+    if (/(FLASH_LIQUIDATOR_ADDRESS|LIQUIDATOR_ADDRESS|LIQUIDATOR_ADDRESSES|EXECUTOR_ADDRESS)/.test(k)) {
+      if (k.endsWith(`_${chainId}`) || !/_\d+$/.test(k)) {
+        v.split(',').forEach((a) => {
+          const addr = a.trim();
+          if (addr) ours.add(addr.toLowerCase());
+        });
+      }
+    }
+  }
+
+  const since = BigInt(Math.floor(Date.now() / 1000) - Math.max(1, hours) * 3600);
+  const rows = await db
+    .select({
+      marketId: schema.liquidation.marketId,
+      borrower: schema.liquidation.borrower,
+      liquidator: schema.liquidation.liquidator,
+      ts: schema.liquidation.ts,
+    })
+    .from(schema.liquidation)
+    .where(and(eq(schema.liquidation.chainId, chainId), gte(schema.liquidation.ts, since)));
+
+  const total = rows.length;
+  const oursCount = rows.filter((r) => ours.has((r.liquidator as string).toLowerCase())).length;
+  const missed = total - oursCount;
+  const uniqueBorrowers = new Set(rows.map((r) => (r.borrower as string).toLowerCase())).size;
+  const uniqueMarkets = new Set(rows.map((r) => (r.marketId as string).toLowerCase())).size;
+
+  return c.json({
+    chainId,
+    hours,
+    total,
+    ours: oursCount,
+    missed,
+    uniqueBorrowers,
+    uniqueMarkets,
+    ourLiquidators: Array.from(ours),
+  });
 });
 
 export default app;
