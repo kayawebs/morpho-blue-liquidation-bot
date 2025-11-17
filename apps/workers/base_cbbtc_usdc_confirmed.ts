@@ -68,8 +68,16 @@ async function main() {
   const cfg = chainConfig(MARKET.chainId);
 
   const forceHttp = process.env.WORKER_FORCE_HTTP === '1' || process.env.FORCE_HTTP === '1';
+  const wsCache = new Map<string, ReturnType<typeof webSocket>>();
+  function getWs(url: string) {
+    const ex = wsCache.get(url);
+    if (ex) return ex;
+    const t = webSocket(url, { retryCount: Infinity, retryDelay: 1_000 });
+    wsCache.set(url, t);
+    return t;
+  }
   const baseTransport = (!forceHttp && cfg.wsRpcUrl)
-    ? webSocket(cfg.wsRpcUrl, { retryCount: Infinity, retryDelay: 1_000 })
+    ? getWs(cfg.wsRpcUrl)
     : http(cfg.rpcUrl);
   const publicClient = createPublicClient({ chain: base, transport: baseTransport });
 
@@ -84,7 +92,7 @@ async function main() {
     (triggerMode === 'flashblock' ? cfg.rpcUrl : undefined);
   const wantFlashblock = triggerMode === 'flashblock';
   const flashTransport = (!forceHttp && flashWs)
-    ? webSocket(flashWs, { retryCount: Infinity, retryDelay: 1_000 })
+    ? getWs(flashWs)
     : (flashHttp ? http(flashHttp) : undefined);
   const triggerClient =
     wantFlashblock && flashTransport

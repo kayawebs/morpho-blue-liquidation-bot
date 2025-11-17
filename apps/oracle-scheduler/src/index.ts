@@ -457,6 +457,16 @@ async function main() {
   console.log(`📡 WS push on :${WS_PORT} at path /ws/schedule?chainId=&oracle=`);
 
   // Start watchers per feed
+  // Cache a single WS transport per URL to avoid multiple parallel sockets
+  const wsCache = new Map<string, ReturnType<typeof webSocket>>();
+  function getWs(url: string) {
+    const ex = wsCache.get(url);
+    if (ex) return ex;
+    const t = webSocket(url as any, { retryDelay: 1000, retryCount: Infinity });
+    wsCache.set(url, t);
+    return t;
+  }
+
   for (const f of cfg.feeds) {
     const key = makeFeedKey(f.chainId, f.aggregator);
     const meta = await getOracleMeta(f.chainId, f.aggregator);
@@ -472,7 +482,7 @@ async function main() {
     else console.log(`🔌 feed ${key}: using HTTP ${httpRpc}`);
     const forceHttp = process.env.SCHED_FORCE_HTTP === '1' || process.env.FORCE_HTTP === '1';
     const transport = (!forceHttp && wsRpc)
-      ? webSocket(wsRpc as any, { retryDelay: 1000, retryCount: Infinity })
+      ? getWs(wsRpc as string)
       : http((httpRpc ?? wsRpc) as any);
     const client = createPublicClient({ transport });
     const evt = getAbiItem({

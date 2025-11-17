@@ -4,6 +4,7 @@ import { createPublicClient, createWalletClient, http, webSocket, type Address }
 import { privateKeyToAccount } from "viem/accounts";
 import WebSocket from "ws";
 import { readContract } from "viem/actions";
+import { appendFile } from "node:fs/promises";
 
 import { morphoBlueAbi } from "../ponder/abis/MorphoBlue.js";
 import { AGGREGATOR_V2V3_ABI } from "./utils/chainlinkAbi.js";
@@ -42,7 +43,16 @@ type Sched = { heartbeat?: Win; deviation?: Win };
 async function main() {
   const cfg = chainConfig(MARKET.chainId);
   const forceHttp = process.env.WORKER_FORCE_HTTP === '1' || process.env.FORCE_HTTP === '1';
-  const publicClient = createPublicClient({ chain: base, transport: (!forceHttp && cfg.wsRpcUrl) ? webSocket(cfg.wsRpcUrl) : http(cfg.rpcUrl) });
+  // Cache a single WS transport per URL in this process
+  const wsCache = new Map<string, ReturnType<typeof webSocket>>();
+  function getWs(url: string) {
+    const ex = wsCache.get(url);
+    if (ex) return ex;
+    const t = webSocket(url);
+    wsCache.set(url, t);
+    return t;
+  }
+  const publicClient = createPublicClient({ chain: base, transport: (!forceHttp && cfg.wsRpcUrl) ? getWs(cfg.wsRpcUrl) : http(cfg.rpcUrl) });
   const flashLiquidator =
     (process.env[`FLASH_LIQUIDATOR_ADDRESS_${MARKET.chainId}`] as Address | undefined) ??
     (process.env.FLASH_LIQUIDATOR_ADDRESS as Address | undefined);
@@ -54,6 +64,21 @@ async function main() {
 
   console.log("🚀 启动预测型 Worker: Base cbBTC/USDC (WS 驱动)");
   console.log(`⚙️  Flash liquidator: ${flashLiquidator}`);
+  console.log("📡  触发来源：优先使用 scheduler 推送的 shots；若无 shots 但当前时刻位于 scheduler 窗口内，同样按 200ms 节奏尝试。");
+
+  function decodeRevertString(data?: string): string | undefined {
+    if (!data || typeof data !== 'string') return undefined;
+    // Error(string): 0x08c379a0 | offset(32) | strLen(32) | strBytes
+    if (!data.startsWith('0x08c379a0')) return undefined;
+    try {
+      const hex = data.slice(10); // strip selector
+      const lenHex = '0x' + hex.slice(64, 128);
+      const len = Number(BigInt(lenHex));
+      const strHex = hex.slice(128, 128 + len * 2);
+      const bytes = Buffer.from(strHex, 'hex');
+      return bytes.toString('utf8');
+    } catch { return undefined; }
+  }
 
   function parseList(key: string): string[] | undefined {
     const v = process.env[key];
@@ -253,9 +278,40 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             functionName: "flashLiquidate",
             args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
           });
-          console.log(`⚡ ${exec.label} 清算 ${borrower} tx=${hash}`);
+          console.log(`⚡ ${exec.label} 清算发送 ${borrower} tx=${hash}`);
+          try {
+            const rc = await (publicClient as any).waitForTransactionReceipt({ hash });
+            if (rc?.status && String(rc.status) !== 'success') {
+              // Best-effort revert reason: re-call at the same block
+              let reason: string | undefined;
+              try {
+                const tx = await (publicClient as any).getTransaction({ hash });
+                // This call is expected to revert and throw
+                await (publicClient as any).call({ to: tx.to, data: tx.input, from: tx.from, value: tx.value, gas: tx.gas, blockNumber: rc.blockNumber });
+              } catch (err: any) {
+                const raw = (err?.data as string | undefined) || (err?.cause?.data as string | undefined) || (err?.error?.data as string | undefined);
+                reason = decodeRevertString(raw) || (err?.shortMessage as string | undefined) || (err?.message as string | undefined);
+              }
+              const line = JSON.stringify({
+                kind: 'onchainFail', chainId: MARKET.chainId, borrower,
+                tx: hash, blockNumber: rc.blockNumber?.toString?.(),
+                gasUsed: rc.gasUsed?.toString?.(), reason,
+                ts: Date.now(),
+              }) + "\n";
+              try { await appendFile('out/worker-tx-failures.ndjson', line); } catch {}
+              console.warn(`⛔ on-chain revert ${borrower} tx=${hash} gasUsed=${rc.gasUsed?.toString?.()}${reason ? ` reason=${reason}` : ''}`);
+            }
+          } catch (e) {
+            // 等待回执阶段错误（如超时），仅在 VERBOSE 下提示
+            if (process.env.WORKER_VERBOSE === '1') {
+              console.warn(`waitForTransactionReceipt error tx=${hash}`, (e as any)?.message ?? e);
+            }
+          }
         } catch (error) {
-          console.warn(`⚠️ flashLiquidate 失败 ${borrower}`, (error as Error).message ?? error);
+          // 估算阶段失败或发送被节点拒绝（未广播），默认不刷屏，仅在 VERBOSE 下打印
+          if (process.env.WORKER_VERBOSE === '1') {
+            console.warn(`⚠️ simulate/send 失败 ${borrower}`, (error as Error).message ?? error);
+          }
         }
       })
     );
