@@ -53,11 +53,22 @@ async function main() {
     );
     const exists = chk.rows?.[0]?.reg != null;
     if (!exists) {
-      console.error(
-        `Table \"${schema}.liquidation\" does not exist yet. Please run \`pnpm ponder:start\` once to apply migrations, then retry.`,
+      // Be non-fatal if table is missing; print empty summary and exit 0 so callers don't get blocked.
+      console.log(
+        JSON.stringify({
+          kind: 'summary',
+          chainId,
+          hours,
+          total: 0,
+          ours: 0,
+          missed: 0,
+          uniqueBorrowers: 0,
+          uniqueMarkets: 0,
+          ourLiquidators: getOurLiquidators(chainId),
+          note: `Table ${schema}.liquidation not found; start indexer to create it.`,
+        }),
       );
       await pool.end();
-      process.exit(2);
       return;
     }
   } catch (_) {
