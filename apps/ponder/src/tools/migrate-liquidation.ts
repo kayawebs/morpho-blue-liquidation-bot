@@ -7,6 +7,10 @@ function env(name: string, def?: string) {
 }
 
 async function main() {
+  if (process.env.PONDER_MIGRATING === '1') {
+    console.log('Skipping migrate-liquidation during Ponder migration (PONDER_MIGRATING=1)');
+    return;
+  }
   const dbUrl = env('POSTGRES_DATABASE_URL') ?? env('DATABASE_URL') ?? 'postgres://ponder:ponder@localhost:5432/ponder';
   const schema = env('PONDER_DB_SCHEMA') ?? env('DATABASE_SCHEMA') ?? 'mblb_ponder';
   const pool = new pg.Pool({ connectionString: dbUrl });
@@ -50,4 +54,3 @@ async function main() {
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
-

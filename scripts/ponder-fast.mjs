@@ -59,7 +59,7 @@ async function main() {
   };
 
   const startWithSchema = async (schema) => new Promise(async (resolveExit) => {
-    const env = { ...baseEnv, DATABASE_SCHEMA: schema, PONDER_DB_SCHEMA: schema };
+    const env = { ...baseEnv, DATABASE_SCHEMA: schema, PONDER_DB_SCHEMA: schema, PONDER_MIGRATING: '1' };
     await ensureBaseSchema(schema);
     // If schema already has tables, resume from DB (disable fast lookback). Else use configured/default lookback.
     const hasData = await detectSchemaHasTables(schema);
