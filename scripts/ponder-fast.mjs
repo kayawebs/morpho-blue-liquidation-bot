@@ -43,7 +43,7 @@ async function main() {
     }
   };
 
-  // Ensure target schema exists and create any custom tables Ponder won't manage itself
+  // Ensure target schema exists (tables are created by Ponder migrations)
   const ensureBaseSchema = async (schema) => {
     try {
       const { Client } = await import('pg');
@@ -52,30 +52,6 @@ async function main() {
       await client.connect();
       // Create schema if missing
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
-      // Create our custom liquidation table if missing (Ponder migrations don't know about it)
-      await client.query(
-        `CREATE TABLE IF NOT EXISTS ${schema}.liquidation (
-          chain_id INTEGER NOT NULL,
-          market_id TEXT NOT NULL,
-          borrower TEXT NOT NULL,
-          repaid_assets BIGINT NOT NULL DEFAULT 0,
-          repaid_shares BIGINT NOT NULL DEFAULT 0,
-          seized_assets BIGINT NOT NULL DEFAULT 0,
-          bad_debt_assets BIGINT NOT NULL DEFAULT 0,
-          bad_debt_shares BIGINT NOT NULL DEFAULT 0,
-          tx_hash TEXT NOT NULL,
-          block_number BIGINT NOT NULL,
-          ts BIGINT NOT NULL,
-          liquidator TEXT NOT NULL,
-          CONSTRAINT liquidation_pk PRIMARY KEY (chain_id, tx_hash)
-        )`
-      );
-      await client.query(
-        `CREATE INDEX IF NOT EXISTS liquidation_idx_market ON ${schema}.liquidation (chain_id, market_id, block_number)`
-      );
-      await client.query(
-        `CREATE INDEX IF NOT EXISTS liquidation_idx_borrower ON ${schema}.liquidation (chain_id, borrower, block_number)`
-      );
       await client.end();
     } catch (e) {
       console.warn('⚠️ Failed to ensure base schema/tables (will continue):', e?.message ?? e);
