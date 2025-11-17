@@ -41,7 +41,8 @@ type Sched = { heartbeat?: Win; deviation?: Win };
 
 async function main() {
   const cfg = chainConfig(MARKET.chainId);
-  const publicClient = createPublicClient({ chain: base, transport: cfg.wsRpcUrl ? webSocket(cfg.wsRpcUrl) : http(cfg.rpcUrl) });
+  const forceHttp = process.env.WORKER_FORCE_HTTP === '1' || process.env.FORCE_HTTP === '1';
+  const publicClient = createPublicClient({ chain: base, transport: (!forceHttp && cfg.wsRpcUrl) ? webSocket(cfg.wsRpcUrl) : http(cfg.rpcUrl) });
   const flashLiquidator =
     (process.env[`FLASH_LIQUIDATOR_ADDRESS_${MARKET.chainId}`] as Address | undefined) ??
     (process.env.FLASH_LIQUIDATOR_ADDRESS as Address | undefined);

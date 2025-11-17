@@ -12,6 +12,16 @@ export interface PredictorDeps {
   agg: PriceAggregator;
 }
 
+const clientCache = new Map<number, ReturnType<typeof createPublicClient>>();
+function getClient(chainId: number, rpcUrl: string) {
+  const key = chainId;
+  const ex = clientCache.get(key);
+  if (ex) return ex;
+  const c = createPublicClient({ transport: http(rpcUrl) });
+  clientCache.set(key, c);
+  return c;
+}
+
 export function buildApp(deps: PredictorDeps) {
   const app = new Hono();
   const appCfg = loadConfig();
@@ -145,7 +155,7 @@ export function buildApp(deps: PredictorDeps) {
 
     const rpc = appCfg.rpc[String(chainId)];
     if (!rpc) return c.json({ error: `RPC for chain ${chainId} not set in config` }, 400);
-    const client = createPublicClient({ transport: http(rpc) });
+    const client = getClient(chainId, rpc);
 
     // Read on-chain latest answer
     let chainAns = 0;

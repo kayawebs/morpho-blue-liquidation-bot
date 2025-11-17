@@ -67,7 +67,8 @@ const OCR2_NEW_TRANSMISSION = [
 async function main() {
   const cfg = chainConfig(MARKET.chainId);
 
-  const baseTransport = cfg.wsRpcUrl
+  const forceHttp = process.env.WORKER_FORCE_HTTP === '1' || process.env.FORCE_HTTP === '1';
+  const baseTransport = (!forceHttp && cfg.wsRpcUrl)
     ? webSocket(cfg.wsRpcUrl, { retryCount: Infinity, retryDelay: 1_000 })
     : http(cfg.rpcUrl);
   const publicClient = createPublicClient({ chain: base, transport: baseTransport });
@@ -82,11 +83,9 @@ async function main() {
     process.env.FLASHBLOCK_RPC_URL ??
     (triggerMode === 'flashblock' ? cfg.rpcUrl : undefined);
   const wantFlashblock = triggerMode === 'flashblock';
-  const flashTransport = flashWs
+  const flashTransport = (!forceHttp && flashWs)
     ? webSocket(flashWs, { retryCount: Infinity, retryDelay: 1_000 })
-    : flashHttp
-      ? http(flashHttp)
-      : undefined;
+    : (flashHttp ? http(flashHttp) : undefined);
   const triggerClient =
     wantFlashblock && flashTransport
       ? createPublicClient({ chain: base, transport: flashTransport })

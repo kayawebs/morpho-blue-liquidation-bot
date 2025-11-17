@@ -470,9 +470,10 @@ async function main() {
     }
     if (wsRpc) console.log(`🔌 feed ${key}: using WS ${wsRpc}`);
     else console.log(`🔌 feed ${key}: using HTTP ${httpRpc}`);
-    const transport = wsRpc
+    const forceHttp = process.env.SCHED_FORCE_HTTP === '1' || process.env.FORCE_HTTP === '1';
+    const transport = (!forceHttp && wsRpc)
       ? webSocket(wsRpc as any, { retryDelay: 1000, retryCount: Infinity })
-      : http(httpRpc as any);
+      : http((httpRpc ?? wsRpc) as any);
     const client = createPublicClient({ transport });
     const evt = getAbiItem({
       abi: [
