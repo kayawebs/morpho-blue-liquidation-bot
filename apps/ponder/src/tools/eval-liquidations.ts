@@ -45,6 +45,24 @@ async function main() {
   const schema = getEnv('PONDER_DB_SCHEMA') ?? getEnv('DATABASE_SCHEMA') ?? 'mblb_ponder';
   const pool = new pg.Pool({ connectionString: dbUrl });
   const since = Math.floor(Date.now() / 1000) - Math.max(1, hours) * 3600;
+  // Ensure table exists (Ponder migration runs on ponder:start). If missing, guide the user.
+  try {
+    const chk = await pool.query(
+      `select to_regclass($1) as reg`,
+      [`${schema}.liquidation`],
+    );
+    const exists = chk.rows?.[0]?.reg != null;
+    if (!exists) {
+      console.error(
+        `Table \"${schema}.liquidation\" does not exist yet. Please run \`pnpm ponder:start\` once to apply migrations, then retry.`,
+      );
+      await pool.end();
+      process.exit(2);
+      return;
+    }
+  } catch (_) {
+    // ignore existence check errors and let the main query error if needed
+  }
   const sql = `select market_id, borrower, liquidator, repaid_assets, repaid_shares, seized_assets, tx_hash, ts
                from ${schema}.liquidation
                where chain_id = $1 and ts >= $2
@@ -89,4 +107,3 @@ async function main() {
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
-
