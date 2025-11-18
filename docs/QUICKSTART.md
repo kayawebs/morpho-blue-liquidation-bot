@@ -50,6 +50,16 @@ pnpm ponder:start
   - `POST /chain/8453/liquidatable-positions` → 清算/预清算仓位。
   - `POST /chain/8453/positions` → 全量仓位，可加 `onlyPreLiq` & `includeContracts`。
 
+### 2.1 历史回填（预清算授权）
+
+运行回填脚本补齐 CreatePreLiquidation 与 SetAuthorization（按主键幂等 upsert）：
+
+```bash
+pnpm ponder:backfill:auth
+```
+
+默认回溯最近 200k 区块（可用 BACKFILL_LOOKBACK_BLOCKS 调整），只回填 `FAST_ONLY_MARKETS`（或根目录 markets.json）内的市场。
+
 ## 3. Oracle Scheduler（窗口对齐 + Shots 推送）
 
 ```bash
