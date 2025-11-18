@@ -171,7 +171,7 @@ async function main() {
   let sprayStartedAt: number | undefined;
   const ws = new WebSocket(wsUrl);
   ws.on("open", () => console.log(`📡 已连接 oracle-scheduler: ${wsUrl}`));
-  ws.on("message", (data) => {
+  ws.on("message", async (data) => {
     try {
       const msg = JSON.parse(String(data));
       if (msg?.type === 'spray') {
