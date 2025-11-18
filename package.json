@@ -16,6 +16,7 @@
     "scheduler:watch:pending": "tsx apps/oracle-scheduler/src/tools/watch-pending-transmit.ts",
     "liquidations:stats": "tsx apps/ponder/src/tools/eval-liquidations.ts",
     "ponder:migrate:liquidation": "tsx apps/ponder/src/tools/migrate-liquidation.ts",
+    "ponder:backfill:auth": "tsx apps/ponder/src/tools/backfill-auth.ts",
     "deploy:guarded": "tsx apps/client/src/deployGuardedLiquidator.ts",
     "deploy:flash": "tsx apps/client/src/deployFlashLiquidator.ts",
     "predictor:eval": "tsx apps/predictor/src/tools/eval-predictor.ts"
