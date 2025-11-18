@@ -102,6 +102,20 @@ pnpm worker:predictive:base:cbbtc_usdc
 6. 启动 Confirmed & Predictive worker，观察日志/metrics：  
    - Confirmed：`Trigger mode` 行、`handled transmit`。  
    - Predictive：`shots触发`、Guard 发送成功日志。  
-7. 可选：`curl http://localhost:48080/priceAt/BTCUSDC?tsMs=<ms>` 获取预测价；`curl http://localhost:48200/timing/next/...` 查看窗口。  
+7. 可选：`curl http://localhost:48080/priceAt/BTCUSDC?tsMs=<ms>` 获取预测价；`curl http://localhost:48200/timing/next/...` 查看窗口。
 
-若任意组件中断，先检查 `.env`/Postgres/RPC，必要时重启单组件即可（数据持久于数据库）。*** End Patch
+## 7. 评估与观测
+
+- Predictor 精度：
+  - `pnpm predictor:eval`（最近 ≤100 次 transmit）：输出 `coveragePct / p50AbsErrBps / p90AbsErrBps / biasBps`。
+  - `GET /oracles/:chain/:oracle/predictionAt?ts=` 获取历史预测价，便于自定义对比。
+- Scheduler 覆盖率：
+  - `pnpm scheduler:eval` 查看整体/心跳/偏移覆盖率与窗口宽度；若采用喷射模式，关注 `start/stop` 与实际 transmit 的对齐情况。
+- 清算统计：
+  - `pnpm liquidations:stats`（最近 24h，可用 `EVAL_HOURS` 调整）统计 `total/ours/missed`；
+  - `GET /chain/8453/liquidations/recent`、`/summary` 提供最近清算与摘要。
+- Worker（预测型）日志：
+  - 会话：`out/worker-sessions.ndjson`（喷射开始/结束、原因、与 transmit 的时差）。
+  - 交易：`out/worker-tx-failures.ndjson`（仅记录“已广播且扣费”的失败回执与原因）。
+
+若任意组件中断，先检查 `.env`/Postgres/RPC，必要时重启单组件即可（状态持久在数据库）。
