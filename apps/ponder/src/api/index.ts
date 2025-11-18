@@ -188,6 +188,27 @@ app.post("/chain/:chainId/positions", async (c) => {
   return c.json(replaceBigInts({ results }));
 });
 
+// Last transmission for an oracle aggregator
+app.get("/oracles/:chainId/:oracle/lastTransmission", async (c) => {
+  const { chainId: chainIdRaw, oracle } = c.req.param();
+  const chainId = Number.parseInt(chainIdRaw, 10);
+  const rows = await db
+    .select({
+      oracleAddr: schema.oracleTransmission.oracleAddr,
+      roundId: schema.oracleTransmission.roundId,
+      answerRaw: schema.oracleTransmission.answerRaw,
+      ts: schema.oracleTransmission.ts,
+      blockNumber: schema.oracleTransmission.blockNumber,
+      txHash: schema.oracleTransmission.txHash,
+    })
+    .from(schema.oracleTransmission)
+    .where(and(eq(schema.oracleTransmission.chainId, chainId), eq(schema.oracleTransmission.oracleAddr, oracle as Address)))
+    .orderBy(desc(schema.oracleTransmission.blockNumber))
+    .limit(1);
+  if (rows.length === 0) return c.json({ found: false });
+  return c.json(replaceBigInts({ found: true, ...rows[0] }));
+});
+
 // Recent liquidations for a chain (optional window & limit)
 app.get("/chain/:chainId/liquidations/recent", async (c) => {
   const { chainId: chainIdRaw } = c.req.param();

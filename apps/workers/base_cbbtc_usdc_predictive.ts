@@ -64,7 +64,7 @@ async function main() {
 
   console.log("🚀 启动预测型 Worker: Base cbBTC/USDC (WS 驱动)");
   console.log(`⚙️  Flash liquidator: ${flashLiquidator}`);
-  console.log("📡  触发来源：优先使用 scheduler 推送的 shots；若无 shots 但当前时刻位于 scheduler 窗口内，同样按 200ms 节奏尝试。");
+  console.log("📡  触发来源：由 scheduler 的喷射(spray)会话控制，窗口暂不参与。");
 
   function decodeRevertString(data?: string): string | undefined {
     if (!data || typeof data !== 'string') return undefined;
@@ -163,24 +163,38 @@ async function main() {
     return out;
   }
 
-  // 接收 scheduler 推送
+  // 接收 scheduler 推送（spray 会话）
   const wsUrl = `ws://localhost:48201/ws/schedule?chainId=${MARKET.chainId}&oracle=${MARKET.aggregator}`;
   let latest: Sched | undefined;
-  let shotQueue: number[] = [];
+  let sprayActive = false;
+  let sprayReason: string | undefined;
+  let sprayStartedAt: number | undefined;
   const ws = new WebSocket(wsUrl);
   ws.on("open", () => console.log(`📡 已连接 oracle-scheduler: ${wsUrl}`));
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(String(data));
-      if (msg?.data) {
-        latest = msg.data as Sched;
-        const dev: any = (latest as any).deviation;
-        if (dev?.shotsMs && Array.isArray(dev.shotsMs)) {
-          const now = Date.now();
-          for (const t of dev.shotsMs as number[]) if (t > now) shotQueue.push(t);
-          // dedupe & sort
-          shotQueue = Array.from(new Set(shotQueue)).sort((a,b)=>a-b);
+      if (msg?.type === 'spray') {
+        if (msg.action === 'start') {
+          sprayActive = true;
+          sprayReason = msg.reason;
+          sprayStartedAt = Number(msg.startedAt ?? Date.now());
+          console.log(`🚨 进入喷射模式 reason=${sprayReason} cadence=${msg.cadenceMs ?? 200}ms`);
+        } else if (msg.action === 'stop') {
+          const endedBy = msg.reason;
+          const roundId = msg.roundId;
+          const ts = msg.ts;
+          if (sprayActive) {
+            const durMs = sprayStartedAt ? Date.now() - sprayStartedAt : undefined;
+            const line = JSON.stringify({ kind: 'spraySession', reason: sprayReason, startedAt: sprayStartedAt, endedAt: Date.now(), endedBy, roundId, transmitTs: ts, durationMs: durMs }) + "\n";
+            try { await appendFile('out/worker-sessions.ndjson', line); } catch {}
+          }
+          sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined;
+          console.log(`🛑 退出喷射模式 reason=${endedBy ?? 'unknown'}`);
         }
+      } else if (msg?.data) {
+        // 兼容旧窗口消息（不使用）
+        latest = msg.data as Sched;
       }
     } catch {}
   });
@@ -234,21 +248,9 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     return prev;
   }
 
-  // 主循环：窗口内每 200ms 尝试（若 scheduler 有 shots 按 shots，否则依据当前窗口时段）
+  // 主循环：喷射模式下每 200ms 尝试
   setInterval(async () => {
-    const nowMs = Date.now();
-    let shouldFire = false;
-    if (shotQueue.length && shotQueue[0]! <= nowMs + 10) {
-      shouldFire = true;
-      while (shotQueue.length && shotQueue[0]! <= nowMs + 10) shotQueue.shift();
-    } else if (latest) {
-      const dev = (latest as any).deviation;
-      const hb = (latest as any).heartbeat;
-      const inDev = dev && typeof dev.start === 'number' && typeof dev.end === 'number' && Math.floor(nowMs/1000) >= dev.start && Math.floor(nowMs/1000) <= dev.end;
-      const inHb = hb && typeof hb.start === 'number' && typeof hb.end === 'number' && Math.floor(nowMs/1000) >= hb.start && Math.floor(nowMs/1000) <= hb.end;
-      shouldFire = Boolean(inDev || inHb);
-    }
-    if (!shouldFire) return;
+    if (!sprayActive) return;
 
     const prevRoundId = await getPrevOrCurrentRoundId();
 

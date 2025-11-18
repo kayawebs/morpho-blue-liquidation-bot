@@ -12,12 +12,15 @@ type FeedKey = string; // `${chainId}:${aggregator.toLowerCase()}`
 const state: Record<FeedKey, { events: RoundEvt[]; decimals: number; lastAnalyzedCount: number; profiles?: any }> = {};
 const subs: Record<FeedKey, Set<WebSocket>> = {};
 const lastNext: Record<FeedKey, string> = {};
+const sessions: Record<FeedKey, { active: boolean; reason?: 'deviation'|'heartbeat'; startedAt?: number }> = {};
 
 const PREDICTOR_URL = process.env.PREDICTOR_URL ?? 'http://localhost:48080';
 const BOOT_LOOKBACK_BLOCKS = BigInt(process.env.SCHED_BOOT_LOOKBACK_BLOCKS ?? '48000');
 const BOOT_CHUNK_BLOCKS = BigInt(process.env.SCHED_BOOT_CHUNK_BLOCKS ?? '4000');
 const REFRESH_INTERVAL_MS = Number(process.env.SCHED_REFRESH_INTERVAL ?? 800);
 const HEARTBEAT_SLACK = Number(process.env.SCHED_HEARTBEAT_SLACK ?? 90);
+const SPRAY_PRE_MARGIN_SEC = Number(process.env.SCHED_SPRAY_PRE_MARGIN_SEC ?? 4); // 提前量
+const SPRAY_CADENCE_MS = Number(process.env.SCHED_SPRAY_CADENCE_MS ?? 200);
 
 function makeFeedKey(chainId: number, agg: string): FeedKey {
   return `${chainId}:${agg.toLowerCase()}`;
@@ -305,6 +308,48 @@ async function fetchNextWindow(chainId: number, agg: string, heartbeat: number, 
   return { heartbeat: { start: hbStart, end: hbEnd, startMs: hbStartMs, endMs: hbEndMs }, deviation: devWin };
 }
 
+function broadcastSpray(feedKey: FeedKey, payload: any) {
+  const listeners = subs[feedKey];
+  if (!listeners || listeners.size === 0) return;
+  const msg = JSON.stringify({ type: 'spray', ...payload });
+  for (const ws of listeners) {
+    try { ws.send(msg); } catch {}
+  }
+}
+
+async function maybeStartOrStopSpray(feed: { chainId: number; aggregator: string }, heartbeat: number, offsetBps: number, lagSeconds: number) {
+  const key = makeFeedKey(feed.chainId, feed.aggregator);
+  const st = state[key];
+  if (!st || st.events.length === 0) return;
+  const last = st.events[st.events.length - 1]!;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const fit = await getFitSummary(feed.chainId, feed.aggregator);
+  const margin = Math.min(offsetBps, Math.max(1, Number(fit?.p90AbsBps ?? 5)));
+  const pred = await fetchPredictedAt(feed.chainId, feed.aggregator, nowSec, lagSeconds);
+  let want = false as boolean;
+  let reason: 'deviation'|'heartbeat'|undefined;
+  if (pred && pred > 0 && last.answer > 0) {
+    const deltaBps = Math.abs(pred - last.answer) / last.answer * 10_000;
+    if (deltaBps >= Math.max(1, offsetBps - margin)) { want = true; reason = 'deviation'; }
+  }
+  if (!want) {
+    const since = nowSec - last.ts;
+    if (since >= Math.max(0, heartbeat - SPRAY_PRE_MARGIN_SEC)) { want = true; reason = 'heartbeat'; }
+  }
+
+  const sess = sessions[key] ?? { active: false };
+  // start
+  if (want && !sess.active) {
+    sessions[key] = { active: true, reason, startedAt: Date.now() };
+    broadcastSpray(key, { action: 'start', feed: key, reason, cadenceMs: SPRAY_CADENCE_MS, startedAt: sessions[key]!.startedAt });
+  }
+  // stop
+  if (!want && sess.active) {
+    sessions[key] = { active: false };
+    broadcastSpray(key, { action: 'stop', feed: key, reason: 'timeout' });
+  }
+}
+
 async function broadcastNextWindow(feed: { chainId: number; aggregator: string }, heartbeat: number, offsetBps: number, lagSeconds: number) {
   const next = await fetchNextWindow(feed.chainId, feed.aggregator, heartbeat, offsetBps, lagSeconds);
   if (!next) return;
@@ -526,6 +571,12 @@ async function main() {
           if (!arr.some((e) => e.block === l.blockNumber && e.roundId === roundId)) {
             arr.push({ roundId, ts: tsSec, answer, block: l.blockNumber, txHash });
             if (arr.length > 2048) arr.splice(0, arr.length - 2048);
+            // If a spray session is active, stop it due to transmit
+            const key = makeFeedKey(feed.chainId, feed.aggregator);
+            if (sessions[key]?.active) {
+              sessions[key] = { active: false };
+              broadcastSpray(key, { action: 'stop', feed: key, reason: 'transmit', roundId, ts: tsSec });
+            }
           }
         }
         // Analyze if new events arrived
@@ -539,6 +590,7 @@ async function main() {
           await analyzeProfiles(f.chainId, f.aggregator, hb, offset, lag);
           stt.lastAnalyzedCount = stt.events.length;
           await broadcastNextWindow(f, hb, offset, lag);
+          await maybeStartOrStopSpray(f, hb, offset, lag);
         }
       } catch (e) {
         console.warn(`Watcher error for ${key}:`, (e as any)?.message ?? e);
@@ -555,6 +607,7 @@ async function main() {
         const offset = metaCur?.offsetBps ?? f.deviationBps;
         const lag = metaCur?.lagSeconds ?? 0;
         await broadcastNextWindow(f, hb, offset, lag);
+        await maybeStartOrStopSpray(f, hb, offset, lag);
       })().catch((e) => {
         console.warn(`refresh error for ${key}:`, (e as any)?.message ?? e);
       });
