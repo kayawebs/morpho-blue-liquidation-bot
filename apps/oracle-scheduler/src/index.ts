@@ -572,7 +572,6 @@ async function main() {
             arr.push({ roundId, ts: tsSec, answer, block: l.blockNumber, txHash });
             if (arr.length > 2048) arr.splice(0, arr.length - 2048);
             // If a spray session is active, stop it due to transmit
-            const key = makeFeedKey(feed.chainId, feed.aggregator);
             if (sessions[key]?.active) {
               sessions[key] = { active: false };
               broadcastSpray(key, { action: 'stop', feed: key, reason: 'transmit', roundId, ts: tsSec });
