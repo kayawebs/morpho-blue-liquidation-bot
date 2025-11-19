@@ -37,6 +37,11 @@ const FLASH_LIQUIDATOR_ABI = [
   },
 ] as const;
 
+const ERC20_DECIMALS_ABI = [
+  { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] },
+  { type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }] },
+] as const;
+
 type Win = { start: number; end: number; state?: string; deltaBps?: number };
 type Sched = { heartbeat?: Win; deviation?: Win };
 
@@ -113,11 +118,15 @@ async function main() {
 
   // 候选账户（与确认型相同）
   const PONDER_API_URL = "http://localhost:42069";
+  const PREDICTOR_URL = process.env.PREDICTOR_URL ?? "http://localhost:48080";
   const CANDIDATE_REFRESH_MS = 30_000; // 更频繁地刷新候选
   const CANDIDATE_BATCH = 200; // 一次扫描更多候选以更快命中有债地址
+  const RISK_REFRESH_MS = 3_000; // Top-N 风险榜刷新频率
+  const RISK_TOP_N = 5;
   const candidateSet = new Set<string>();
   let candidates: Address[] = [];
   let nextIdx = 0;
+  let topRiskBorrowers: Address[] = [];
 
   async function fetchCandidates(): Promise<void> {
     try {
@@ -156,11 +165,116 @@ async function main() {
   }
 
   function pickBatch(): Address[] {
+    if (topRiskBorrowers.length > 0) {
+      return topRiskBorrowers.slice(0, Math.min(RISK_TOP_N, topRiskBorrowers.length));
+    }
     if (candidates.length === 0) return [];
     const out: Address[] = [];
     for (let i = 0; i < CANDIDATE_BATCH && i < candidates.length; i++) out.push(candidates[(nextIdx + i) % candidates.length]!);
     nextIdx = (nextIdx + CANDIDATE_BATCH) % Math.max(1, candidates.length);
     return out;
+  }
+
+  async function getMarketParams() {
+    return readContract(publicClient as any, {
+      address: MARKET.morphoAddress,
+      abi: morphoBlueAbi,
+      functionName: "idToMarketParams",
+      args: [MARKET.marketId],
+    });
+  }
+
+  async function getMarketView() {
+    return readContract(publicClient as any, {
+      address: MARKET.morphoAddress,
+      abi: morphoBlueAbi,
+      functionName: "market",
+      args: [MARKET.marketId],
+    });
+  }
+
+  async function getTokenDecimals(addr: Address): Promise<number> {
+    try {
+      const dec = (await readContract(publicClient as any, { address: addr, abi: ERC20_DECIMALS_ABI, functionName: 'decimals' })) as number;
+      return Number(dec);
+    } catch { return 18; }
+  }
+
+  async function fetchPredictedNow(): Promise<number | undefined> {
+    try {
+      const url = new URL(`/oracles/${MARKET.chainId}/${MARKET.aggregator}/predictionAt`, PREDICTOR_URL);
+      url.searchParams.set('ts', String(Math.floor(Date.now() / 1000)));
+      const res = await fetch(url);
+      if (res.ok) {
+        const j = await res.json();
+        const v = (j?.answer ?? j?.predicted ?? j?.price) as number | string | undefined;
+        if (typeof v === 'number') return v;
+        if (typeof v === 'string') return Number(v);
+      }
+    } catch {}
+    return undefined;
+  }
+
+  async function refreshTopRisk(): Promise<void> {
+    try {
+      const [mParams, mView] = await Promise.all([getMarketParams(), getMarketView()]);
+      const lltv = BigInt((mParams as any).lltv as string | number | bigint);
+      const loanTokenAddr = (mParams as any).loanToken as Address;
+      const collateralTokenAddr = (mParams as any).collateralToken as Address;
+      const [loanDec, collDec] = await Promise.all([
+        getTokenDecimals(loanTokenAddr),
+        getTokenDecimals(collateralTokenAddr),
+      ]);
+      const [totalBorrowAssets, totalBorrowShares] = [BigInt((mView as any).totalBorrowAssets), BigInt((mView as any).totalBorrowShares)];
+      if (totalBorrowShares === 0n) { topRiskBorrowers = []; return; }
+
+      // Fetch all positions for this market
+      const res = await fetch(new URL(`/chain/${MARKET.chainId}/positions`, PONDER_API_URL), {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ marketIds: [MARKET.marketId], onlyPreLiq: false, includeContracts: false })
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const list = (data?.results?.[0]?.positions ?? []) as any[];
+      if (!Array.isArray(list) || list.length === 0) { topRiskBorrowers = []; return; }
+
+      const price = await fetchPredictedNow();
+      if (!price || !(price > 0)) { topRiskBorrowers = []; return; }
+      // Aggregator decimals assumed 8 by default, attempt to read from feed if needed
+      let aggDecimals = 8;
+      try {
+        const d = (await readContract(publicClient as any, { address: MARKET.aggregator, abi: AGGREGATOR_V2V3_ABI, functionName: 'decimals' })) as number;
+        aggDecimals = Number(d);
+      } catch {}
+
+      const loanScale = BigInt(10 ** loanDec);
+      const collScale = BigInt(10 ** collDec);
+      const priceScale = BigInt(10 ** aggDecimals);
+
+      const items: { user: Address; riskE18: bigint }[] = [];
+      for (const p of list) {
+        const user = p.user as Address;
+        const bShares = BigInt(p.borrowShares as string | number | bigint);
+        if (bShares <= 0n) continue;
+        const collateral = BigInt(p.collateral as string | number | bigint);
+        // borrowAssets in loan token units
+        const borrowAssets = (BigInt(p.borrowShares as any) * totalBorrowAssets) / totalBorrowShares;
+        // collateral value in loan units: collateral * price * 10^loanDec / (10^collDec * 10^aggDec)
+        const collValueLoan = (collateral * BigInt(Math.floor(price * 10 ** 0)) * loanScale) / (collScale * priceScale);
+        if (collValueLoan === 0n) continue;
+        const maxBorrow = (collValueLoan * lltv) / BigInt(1e18);
+        if (maxBorrow === 0n) continue;
+        const riskE18 = (borrowAssets * BigInt(1e18)) / maxBorrow;
+        items.push({ user, riskE18 });
+      }
+      items.sort((a, b) => (b.riskE18 > a.riskE18 ? 1 : b.riskE18 < a.riskE18 ? -1 : 0));
+      topRiskBorrowers = items.slice(0, RISK_TOP_N).map((x) => x.user);
+      if (process.env.WORKER_VERBOSE === '1') {
+        console.log(`⚖️ Top risk borrowers updated (N=${topRiskBorrowers.length})`);
+      }
+    } catch (e) {
+      if (process.env.WORKER_VERBOSE === '1') console.warn('refreshTopRisk error', (e as any)?.message ?? e);
+    }
   }
 
   // 接收 scheduler 推送（spray 会话）
@@ -321,6 +435,9 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
 
   await fetchCandidates();
   setInterval(fetchCandidates, CANDIDATE_REFRESH_MS);
+  // 风险 Top-N 定时刷新
+  await refreshTopRisk();
+  setInterval(refreshTopRisk, RISK_REFRESH_MS);
   console.log("✅ 预测型策略已启动（等待 scheduler 推送窗口）");
 }
 
