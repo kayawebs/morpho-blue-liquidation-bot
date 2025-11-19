@@ -12,7 +12,7 @@ type FeedKey = string; // `${chainId}:${aggregator.toLowerCase()}`
 const state: Record<FeedKey, { events: RoundEvt[]; decimals: number; lastAnalyzedCount: number; profiles?: any }> = {};
 const subs: Record<FeedKey, Set<WebSocket>> = {};
 const lastNext: Record<FeedKey, string> = {};
-const sessions: Record<FeedKey, { active: boolean; reason?: 'deviation'|'heartbeat'; startedAt?: number }> = {};
+const sessions: Record<FeedKey, { active: boolean; reason?: 'deviation'|'heartbeat'; startedAtMs?: number; cooldownUntilMs?: number }> = {};
 
 const PREDICTOR_URL = process.env.PREDICTOR_URL ?? 'http://localhost:48080';
 const BOOT_LOOKBACK_BLOCKS = BigInt(process.env.SCHED_BOOT_LOOKBACK_BLOCKS ?? '48000');
@@ -22,6 +22,9 @@ const HEARTBEAT_SLACK = Number(process.env.SCHED_HEARTBEAT_SLACK ?? 90);
 // 更激进的默认值：加大心跳提前量、提高喷射频率
 const SPRAY_PRE_MARGIN_SEC = Number(process.env.SCHED_SPRAY_PRE_MARGIN_SEC ?? 45);
 const SPRAY_CADENCE_MS = Number(process.env.SCHED_SPRAY_CADENCE_MS ?? 150);
+const SPRAY_MIN_SESSION_SEC = Number(process.env.SCHED_SPRAY_MIN_SESSION_SEC ?? 20);
+const SPRAY_HB_MAX_SESSION_SEC = Number(process.env.SCHED_SPRAY_HB_MAX_SESSION_SEC ?? 60);
+const SPRAY_COOLDOWN_SEC = Number(process.env.SCHED_SPRAY_COOLDOWN_SEC ?? 5);
 
 function makeFeedKey(chainId: number, agg: string): FeedKey {
   return `${chainId}:${agg.toLowerCase()}`;
@@ -324,6 +327,7 @@ async function maybeStartOrStopSpray(feed: { chainId: number; aggregator: string
   if (!st || st.events.length === 0) return;
   const last = st.events[st.events.length - 1]!;
   const nowSec = Math.floor(Date.now() / 1000);
+  const nowMs = Date.now();
   // 更激进：允许更小的 margin（至多扣 1 bps），优先覆盖率
   const fit = await getFitSummary(feed.chainId, feed.aggregator);
   const estP90 = Number(fit?.p90AbsBps ?? 5);
@@ -343,13 +347,25 @@ async function maybeStartOrStopSpray(feed: { chainId: number; aggregator: string
   const sess = sessions[key] ?? { active: false };
   // start
   if (want && !sess.active) {
-    sessions[key] = { active: true, reason, startedAt: Date.now() };
-    broadcastSpray(key, { action: 'start', feed: key, reason, cadenceMs: SPRAY_CADENCE_MS, startedAt: sessions[key]!.startedAt });
+    if (sess.cooldownUntilMs && nowMs < sess.cooldownUntilMs) return; // debounce
+    sessions[key] = { active: true, reason, startedAtMs: nowMs, cooldownUntilMs: 0 };
+    broadcastSpray(key, { action: 'start', feed: key, reason, cadenceMs: SPRAY_CADENCE_MS, startedAt: nowMs });
   }
-  // stop
+  // stop with sticky logic
   if (!want && sess.active) {
-    sessions[key] = { active: false };
-    broadcastSpray(key, { action: 'stop', feed: key, reason: 'timeout' });
+    const startedAtMs = sess.startedAtMs ?? nowMs;
+    const elapsedSec = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
+    if (sess.reason === 'heartbeat') {
+      // Heartbeat mode: keep until transmit or max session time
+      if (elapsedSec < SPRAY_HB_MAX_SESSION_SEC) return;
+      sessions[key] = { active: false, cooldownUntilMs: nowMs + SPRAY_COOLDOWN_SEC * 1000 } as any;
+      broadcastSpray(key, { action: 'stop', feed: key, reason: 'hb_timeout' });
+    } else {
+      // Deviation mode: require min session before stopping on condition drop
+      if (elapsedSec < SPRAY_MIN_SESSION_SEC) return;
+      sessions[key] = { active: false, cooldownUntilMs: nowMs + SPRAY_COOLDOWN_SEC * 1000 } as any;
+      broadcastSpray(key, { action: 'stop', feed: key, reason: 'timeout' });
+    }
   }
 }
 
