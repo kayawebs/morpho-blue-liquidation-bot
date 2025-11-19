@@ -19,8 +19,9 @@ const BOOT_LOOKBACK_BLOCKS = BigInt(process.env.SCHED_BOOT_LOOKBACK_BLOCKS ?? '4
 const BOOT_CHUNK_BLOCKS = BigInt(process.env.SCHED_BOOT_CHUNK_BLOCKS ?? '4000');
 const REFRESH_INTERVAL_MS = Number(process.env.SCHED_REFRESH_INTERVAL ?? 800);
 const HEARTBEAT_SLACK = Number(process.env.SCHED_HEARTBEAT_SLACK ?? 90);
-const SPRAY_PRE_MARGIN_SEC = Number(process.env.SCHED_SPRAY_PRE_MARGIN_SEC ?? 4); // 提前量
-const SPRAY_CADENCE_MS = Number(process.env.SCHED_SPRAY_CADENCE_MS ?? 200);
+// 更激进的默认值：加大心跳提前量、提高喷射频率
+const SPRAY_PRE_MARGIN_SEC = Number(process.env.SCHED_SPRAY_PRE_MARGIN_SEC ?? 45);
+const SPRAY_CADENCE_MS = Number(process.env.SCHED_SPRAY_CADENCE_MS ?? 150);
 
 function makeFeedKey(chainId: number, agg: string): FeedKey {
   return `${chainId}:${agg.toLowerCase()}`;
@@ -323,8 +324,10 @@ async function maybeStartOrStopSpray(feed: { chainId: number; aggregator: string
   if (!st || st.events.length === 0) return;
   const last = st.events[st.events.length - 1]!;
   const nowSec = Math.floor(Date.now() / 1000);
+  // 更激进：允许更小的 margin（至多扣 1 bps），优先覆盖率
   const fit = await getFitSummary(feed.chainId, feed.aggregator);
-  const margin = Math.min(offsetBps, Math.max(1, Number(fit?.p90AbsBps ?? 5)));
+  const estP90 = Number(fit?.p90AbsBps ?? 5);
+  const margin = Math.max(1, Math.min(offsetBps, Math.min(estP90, 1))); // 至多扣 1 bps
   const pred = await fetchPredictedAt(feed.chainId, feed.aggregator, nowSec, lagSeconds);
   let want = false as boolean;
   let reason: 'deviation'|'heartbeat'|undefined;

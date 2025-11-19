@@ -113,8 +113,8 @@ async function main() {
 
   // 候选账户（与确认型相同）
   const PONDER_API_URL = "http://localhost:42069";
-  const CANDIDATE_REFRESH_MS = 60_000;
-  const CANDIDATE_BATCH = 50;
+  const CANDIDATE_REFRESH_MS = 30_000; // 更频繁地刷新候选
+  const CANDIDATE_BATCH = 200; // 一次扫描更多候选以更快命中有债地址
   const candidateSet = new Set<string>();
   let candidates: Address[] = [];
   let nextIdx = 0;
@@ -248,7 +248,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     return prev;
   }
 
-  // 主循环：喷射模式下每 200ms 尝试
+  // 主循环：喷射模式下每 150ms 尝试（更激进）
   setInterval(async () => {
     if (!sprayActive) return;
 
@@ -317,7 +317,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
         }
       })
     );
-  }, 200);
+  }, 150);
 
   await fetchCandidates();
   setInterval(fetchCandidates, CANDIDATE_REFRESH_MS);
