@@ -12,6 +12,7 @@ type FeedKey = string; // `${chainId}:${aggregator.toLowerCase()}`
 const state: Record<FeedKey, { events: RoundEvt[]; decimals: number; lastAnalyzedCount: number; profiles?: any }> = {};
 const subs: Record<FeedKey, Set<WebSocket>> = {};
 const lastNext: Record<FeedKey, string> = {};
+const lastPersistAtMs: Record<FeedKey, number> = {};
 const sessions: Record<FeedKey, { active: boolean; reason?: 'deviation'|'heartbeat'; startedAtMs?: number; cooldownUntilMs?: number }> = {};
 
 const PREDICTOR_URL = process.env.PREDICTOR_URL ?? 'http://localhost:48080';
@@ -374,45 +375,53 @@ async function broadcastNextWindow(feed: { chainId: number; aggregator: string }
   if (!next) return;
   const key = makeFeedKey(feed.chainId, feed.aggregator);
   const payload = JSON.stringify({ type: 'update', feed: key, ts: Math.floor(Date.now() / 1000), data: next });
-  if (lastNext[key] === payload) return;
-  lastNext[key] = payload;
-  // Persist windows snapshot for later evaluation
+  // Persist windows snapshot for later evaluation (throttled to 5s) even if the WS payload is unchanged
   try {
-    const rows: any[] = [];
-    if (next.heartbeat && Number.isFinite(next.heartbeat.start) && Number.isFinite(next.heartbeat.end)) {
-      rows.push({
-        chainId: feed.chainId,
-        oracleAddr: feed.aggregator,
-        kind: 'heartbeat',
-        startTs: Math.floor(next.heartbeat.start),
-        endTs: Math.floor(next.heartbeat.end),
-        startMs: Number.isFinite(next.heartbeat.startMs) ? Math.floor(next.heartbeat.startMs) : null,
-        endMs: Number.isFinite(next.heartbeat.endMs) ? Math.floor(next.heartbeat.endMs) : null,
-        state: null,
-        deltaBps: null,
-        shotsMs: null,
-        params: { heartbeatSeconds: heartbeat, offsetBps, lagSeconds },
-      });
+    const now = Date.now();
+    const last = lastPersistAtMs[key] ?? 0;
+    if (now - last >= 5000) {
+      const rows: any[] = [];
+      if (next.heartbeat && Number.isFinite(next.heartbeat.start) && Number.isFinite(next.heartbeat.end)) {
+        rows.push({
+          chainId: feed.chainId,
+          oracleAddr: feed.aggregator,
+          kind: 'heartbeat',
+          startTs: Math.floor(next.heartbeat.start),
+          endTs: Math.floor(next.heartbeat.end),
+          startMs: Number.isFinite(next.heartbeat.startMs) ? Math.floor(next.heartbeat.startMs) : null,
+          endMs: Number.isFinite(next.heartbeat.endMs) ? Math.floor(next.heartbeat.endMs) : null,
+          state: null,
+          deltaBps: null,
+          shotsMs: null,
+          params: { heartbeatSeconds: heartbeat, offsetBps, lagSeconds },
+        });
+      }
+      if (next.deviation && Number.isFinite(next.deviation.start) && Number.isFinite(next.deviation.end)) {
+        rows.push({
+          chainId: feed.chainId,
+          oracleAddr: feed.aggregator,
+          kind: 'deviation',
+          startTs: Math.floor(next.deviation.start),
+          endTs: Math.floor(next.deviation.end),
+          startMs: Number.isFinite(next.deviation.startMs) ? Math.floor(next.deviation.startMs) : null,
+          endMs: Number.isFinite(next.deviation.endMs) ? Math.floor(next.deviation.endMs) : null,
+          state: next.deviation.state ?? null,
+          deltaBps: Number.isFinite(next.deviation.deltaBps) ? Number(next.deviation.deltaBps) : null,
+          shotsMs: Array.isArray(next.deviation.shotsMs) ? next.deviation.shotsMs : null,
+          params: { heartbeatSeconds: heartbeat, offsetBps, lagSeconds },
+        });
+      }
+      if (rows.length > 0) {
+        await insertWindows(rows);
+        lastPersistAtMs[key] = now;
+      }
     }
-    if (next.deviation && Number.isFinite(next.deviation.start) && Number.isFinite(next.deviation.end)) {
-      rows.push({
-        chainId: feed.chainId,
-        oracleAddr: feed.aggregator,
-        kind: 'deviation',
-        startTs: Math.floor(next.deviation.start),
-        endTs: Math.floor(next.deviation.end),
-        startMs: Number.isFinite(next.deviation.startMs) ? Math.floor(next.deviation.startMs) : null,
-        endMs: Number.isFinite(next.deviation.endMs) ? Math.floor(next.deviation.endMs) : null,
-        state: next.deviation.state ?? null,
-        deltaBps: Number.isFinite(next.deviation.deltaBps) ? Number(next.deviation.deltaBps) : null,
-        shotsMs: Array.isArray(next.deviation.shotsMs) ? next.deviation.shotsMs : null,
-        params: { heartbeatSeconds: heartbeat, offsetBps, lagSeconds },
-      });
-    }
-    if (rows.length > 0) await insertWindows(rows);
   } catch (e) {
     console.warn('persist windows failed:', (e as any)?.message ?? e);
   }
+  // Only send WS to clients when payload changed
+  if (lastNext[key] === payload) return;
+  lastNext[key] = payload;
   const listeners = subs[key];
   if (!listeners || listeners.size === 0) return;
   for (const ws of listeners) {
