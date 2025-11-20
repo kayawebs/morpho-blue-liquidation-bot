@@ -3,6 +3,7 @@ import { base } from "viem/chains";
 import { createPublicClient, createWalletClient, http, webSocket, type Address } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import WebSocket from "ws";
+import { createServer } from "http";
 import { readContract } from "viem/actions";
 import { appendFile } from "node:fs/promises";
 
@@ -283,6 +284,7 @@ async function main() {
   let sprayActive = false;
   let sprayReason: string | undefined;
   let sprayStartedAt: number | undefined;
+  const metrics = { sessions: 0, attempts: 0, onchainFail: 0, success: 0 };
   const ws = new WebSocket(wsUrl);
   ws.on("open", () => console.log(`📡 已连接 oracle-scheduler: ${wsUrl}`));
   ws.on("message", async (data) => {
@@ -293,6 +295,7 @@ async function main() {
           sprayActive = true;
           sprayReason = msg.reason;
           sprayStartedAt = Number(msg.startedAt ?? Date.now());
+          metrics.sessions++;
           console.log(`🚨 进入喷射模式 reason=${sprayReason} cadence=${msg.cadenceMs ?? 200}ms`);
         } else if (msg.action === 'stop') {
           const endedBy = msg.reason;
@@ -395,6 +398,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
           });
           console.log(`⚡ ${exec.label} 清算发送 ${borrower} tx=${hash}`);
+          metrics.attempts++;
           try {
             const rc = await (publicClient as any).waitForTransactionReceipt({ hash });
             if (rc?.status && String(rc.status) !== 'success') {
@@ -415,7 +419,19 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
                 ts: Date.now(),
               }) + "\n";
               try { await appendFile('out/worker-tx-failures.ndjson', line); } catch {}
+              metrics.onchainFail++;
               console.warn(`⛔ on-chain revert ${borrower} tx=${hash} gasUsed=${rc.gasUsed?.toString?.()}${reason ? ` reason=${reason}` : ''}`);
+            } else {
+              // Success path
+              const sline = JSON.stringify({
+                kind: 'onchainSuccess', chainId: MARKET.chainId, borrower,
+                tx: hash, blockNumber: rc.blockNumber?.toString?.(),
+                gasUsed: rc.gasUsed?.toString?.(),
+                ts: Date.now(),
+              }) + "\n";
+              try { await appendFile('out/worker-tx-success.ndjson', sline); } catch {}
+              metrics.success++;
+              console.log(`✅ on-chain success ${borrower} tx=${hash} gasUsed=${rc.gasUsed?.toString?.()}`);
             }
           } catch (e) {
             // 等待回执阶段错误（如超时），仅在 VERBOSE 下提示
@@ -438,6 +454,24 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
   // 风险 Top-N 定时刷新
   await refreshTopRisk();
   setInterval(refreshTopRisk, RISK_REFRESH_MS);
+  // Metrics endpoint
+  try {
+    const srv = createServer((_req, res) => {
+      if (_req.url === '/metrics') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          sessions: metrics.sessions,
+          attempts: metrics.attempts,
+          onchainFail: metrics.onchainFail,
+          success: metrics.success,
+        }));
+        return;
+      }
+      res.statusCode = 404; res.end('not found');
+    });
+    const port = Number(process.env.WORKER_METRICS_PORT ?? 48102);
+    srv.listen(port, () => console.log(`📊 Predictive worker metrics on :${port}/metrics`));
+  } catch {}
   console.log("✅ 预测型策略已启动（等待 scheduler 推送窗口）");
 }
 
