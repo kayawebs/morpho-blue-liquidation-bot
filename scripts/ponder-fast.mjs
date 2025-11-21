@@ -1,6 +1,12 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import dotenv from 'dotenv';
+
+// Load root .env so child process inherits RPC_URL_8453, etc.
+try {
+  dotenv.config({ path: resolve(process.cwd(), '.env') });
+} catch {}
 
 function readMarkets() {
   const p = resolve(process.cwd(), 'markets.json');
