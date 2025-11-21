@@ -5,6 +5,12 @@ import schema from "ponder:schema";
 import type { Address, Hex } from "viem";
 
 import { getLiquidatablePositions } from "./liquidatable-positions";
+import { chainConfig } from "../../config/dist/index.js";
+import { morphoBlueAbi } from "../../ponder/abis/MorphoBlue.js";
+
+const ERC20_DECIMALS_ABI = [
+  { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] },
+] as const;
 
 function replaceBigInts<T>(value: T) {
   return replaceBigIntsBase(value, (x) => `${String(x)}n`);
@@ -186,6 +192,41 @@ app.post("/chain/:chainId/positions", async (c) => {
   }
 
   return c.json(replaceBigInts({ results }));
+});
+
+/**
+ * Read market view & params from chain via the same viem client that Ponder uses.
+ * Body: { marketId: Hex }
+ * Returns: { loanToken, collateralToken, lltv, totalBorrowAssets, totalBorrowShares, loanDec, collDec }
+ */
+app.post("/chain/:chainId/marketView", async (c) => {
+  const { chainId: chainIdRaw } = c.req.param();
+  const { marketId } = (await c.req.json()) as unknown as { marketId: Hex };
+  if (!marketId || typeof marketId !== 'string') {
+    return c.json({ error: "Request body must include `marketId` (Hex)" }, 400);
+  }
+  const chainId = Number.parseInt(chainIdRaw, 10);
+  const publicClient = Object.values(publicClients).find((pc) => pc.chain?.id === chainId);
+  if (!publicClient) return c.json({ error: `Unsupported chain ${chainId}` }, 400);
+
+  const cfg = chainConfig(chainId);
+  const morphoAddr = cfg.morpho.address as Address;
+
+  const [params, view] = await Promise.all([
+    publicClient.readContract({ address: morphoAddr, abi: morphoBlueAbi as any, functionName: 'idToMarketParams', args: [marketId as any] }),
+    publicClient.readContract({ address: morphoAddr, abi: morphoBlueAbi as any, functionName: 'market', args: [marketId as any] }),
+  ]);
+  const loanToken = (params as any).loanToken as Address;
+  const collateralToken = (params as any).collateralToken as Address;
+  const lltv = (params as any).lltv as bigint;
+  const totalBorrowAssets = (view as any).totalBorrowAssets as bigint;
+  const totalBorrowShares = (view as any).totalBorrowShares as bigint;
+  const [loanDec, collDec] = await Promise.all([
+    publicClient.readContract({ address: loanToken, abi: ERC20_DECIMALS_ABI as any, functionName: 'decimals' }) as Promise<number>,
+    publicClient.readContract({ address: collateralToken, abi: ERC20_DECIMALS_ABI as any, functionName: 'decimals' }) as Promise<number>,
+  ]);
+
+  return c.json(replaceBigInts({ loanToken, collateralToken, lltv, totalBorrowAssets, totalBorrowShares, loanDec, collDec }));
 });
 
 // Last transmission for an oracle aggregator

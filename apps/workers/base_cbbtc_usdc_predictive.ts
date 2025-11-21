@@ -208,6 +208,35 @@ async function main() {
 
   function pow10(n: number): bigint { return 10n ** BigInt(n); }
 
+  // 通过 Ponder API 获取市场视图/参数，避免直接链上读取带来的分歧
+  async function getMarketViewFromPonder(): Promise<{
+    loanToken: Address;
+    collateralToken: Address;
+    lltv: bigint;
+    totalBorrowAssets: bigint;
+    totalBorrowShares: bigint;
+    loanDec: number;
+    collDec: number;
+  } | null> {
+    try {
+      const res = await fetch(new URL(`/chain/${MARKET.chainId}/marketView`, PONDER_API_URL), {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ marketId: MARKET.marketId }),
+      });
+      if (!res.ok) return null;
+      const j = await res.json();
+      return {
+        loanToken: j.loanToken as Address,
+        collateralToken: j.collateralToken as Address,
+        lltv: toBigIntOr(j.lltv, 0n),
+        totalBorrowAssets: toBigIntOr(j.totalBorrowAssets, 0n),
+        totalBorrowShares: toBigIntOr(j.totalBorrowShares, 0n),
+        loanDec: Number(j.loanDec ?? 18),
+        collDec: Number(j.collDec ?? 18),
+      };
+    } catch { return null; }
+  }
+
   async function getMarketParams() {
     return readContract(publicClient as any, {
       address: MARKET.morphoAddress,
@@ -250,23 +279,15 @@ async function main() {
 
   async function refreshTopRisk(): Promise<void> {
     try {
-      const [mParams, mView] = await Promise.all([getMarketParams(), getMarketView()]);
-      const lltv = toBigIntOr((mParams as any)?.lltv, 0n);
-      const loanTokenAddr = (mParams as any)?.loanToken as Address;
-      const collateralTokenAddr = (mParams as any)?.collateralToken as Address;
-      const oracleFromParams = (mParams as any)?.oracle as Address | undefined;
-      const [loanDec, collDec] = await Promise.all([
-        getTokenDecimals(loanTokenAddr),
-        getTokenDecimals(collateralTokenAddr),
-      ]);
-      const totalBorrowAssets = toBigIntOr((mView as any)?.totalBorrowAssets, 0n);
-      const totalBorrowShares = toBigIntOr((mView as any)?.totalBorrowShares, 0n);
+      const mv = await getMarketViewFromPonder();
+      if (!mv) { topRiskBorrowers = []; diag.topRiskCount = 0; diag.positions = 0; diag.priceOk = false; diag.lastError = 'marketView api error'; diag.lastAt = Date.now(); return; }
+      const { lltv, loanToken: loanTokenAddr, collateralToken: collateralTokenAddr, loanDec, collDec, totalBorrowAssets, totalBorrowShares } = mv;
       diag.loanDec = loanDec; diag.collDec = collDec; diag.lltv = lltv.toString();
       diag.totalBorrowAssets = totalBorrowAssets.toString();
       diag.totalBorrowShares = totalBorrowShares.toString();
       diag.loanToken = loanTokenAddr;
       diag.collateralToken = collateralTokenAddr;
-      diag.oracleFromParams = oracleFromParams;
+      // oracleFromParams 暂不从 Ponder 读取
       if (totalBorrowShares === 0n) { topRiskBorrowers = []; diag.topRiskCount = 0; diag.positions = 0; diag.priceOk = false; return; }
 
       // Fetch all positions for this market
