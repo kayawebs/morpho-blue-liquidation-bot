@@ -285,6 +285,27 @@ async function main() {
   let sprayReason: string | undefined;
   let sprayStartedAt: number | undefined;
   const metrics = { sessions: 0, attempts: 0, onchainFail: 0, success: 0 };
+  // 模拟统计与耗时埋点（按需开启：WORKER_SIMULATE=1）
+  const doSimulate = process.env.WORKER_SIMULATE === '1';
+  const sim = {
+    count: 0,
+    blocked: 0,
+    durations: [] as number[], // 仅保留最近 500 次
+    push(ms: number) {
+      this.durations.push(ms);
+      if (this.durations.length > 500) this.durations.shift();
+    },
+    p(q: number) {
+      if (this.durations.length === 0) return 0;
+      const arr = [...this.durations].sort((a, b) => a - b);
+      const idx = Math.min(arr.length - 1, Math.max(0, Math.floor(q * (arr.length - 1))));
+      return arr[idx] ?? 0;
+    },
+    avg() {
+      if (this.durations.length === 0) return 0;
+      return this.durations.reduce((a, b) => a + b, 0) / this.durations.length;
+    },
+  };
   const ws = new WebSocket(wsUrl);
   ws.on("open", () => console.log(`📡 已连接 oracle-scheduler: ${wsUrl}`));
   ws.on("message", async (data) => {
@@ -391,12 +412,40 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
       targets.slice(0, executors.length).map(async (borrower, idx) => {
         const exec = executors[idx]!;
         try {
-          const hash = await exec.wc.writeContract({
-            address: flashLiquidator,
-            abi: FLASH_LIQUIDATOR_ABI,
-            functionName: "flashLiquidate",
-            args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
-          });
+          // 可选：先进行 simulate 并记录耗时；成功则复用 request 发送
+          let hash: `0x${string}`;
+          if (doSimulate) {
+            sim.count++;
+            const t0 = Date.now();
+            try {
+              const { request } = await (publicClient as any).simulateContract({
+                address: flashLiquidator,
+                abi: FLASH_LIQUIDATOR_ABI,
+                functionName: 'flashLiquidate',
+                args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
+                account: exec.wc.account,
+              });
+              const t1 = Date.now();
+              sim.push(t1 - t0);
+              hash = await exec.wc.writeContract(request as any);
+            } catch (err: any) {
+              const t1 = Date.now();
+              sim.push(t1 - (t1 - 1)); // 记录一次极短失败，避免 0
+              sim.blocked++;
+              // 模拟被拦截：默认静默，仅在 VERBOSE 下提示
+              if (process.env.WORKER_VERBOSE === '1') {
+                console.warn(`🧪 simulate 拦截 ${borrower}`, err?.shortMessage ?? err?.message ?? err);
+              }
+              return; // 被 simulate 拦截则不发送
+            }
+          } else {
+            hash = await exec.wc.writeContract({
+              address: flashLiquidator,
+              abi: FLASH_LIQUIDATOR_ABI,
+              functionName: "flashLiquidate",
+              args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
+            });
+          }
           console.log(`⚡ ${exec.label} 清算发送 ${borrower} tx=${hash}`);
           metrics.attempts++;
           try {
@@ -464,6 +513,14 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           attempts: metrics.attempts,
           onchainFail: metrics.onchainFail,
           success: metrics.success,
+          simulate: {
+            enabled: doSimulate,
+            count: sim.count,
+            blocked: sim.blocked,
+            avgMs: Math.round(sim.avg()),
+            p50Ms: Math.round(sim.p(0.5)),
+            p90Ms: Math.round(sim.p(0.9)),
+          },
         }));
         return;
       }
