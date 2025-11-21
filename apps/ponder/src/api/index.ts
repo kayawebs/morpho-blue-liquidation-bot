@@ -5,8 +5,11 @@ import schema from "ponder:schema";
 import type { Address, Hex } from "viem";
 
 import { getLiquidatablePositions } from "./liquidatable-positions";
-import { chainConfig } from "../../config/dist/index.js";
-import { morphoBlueAbi } from "../../ponder/abis/MorphoBlue.js";
+// Note: paths are resolved relative to apps/ponder/src/api
+// - config lives at apps/config/dist
+// - ABIs live at apps/ponder/abis
+import { chainConfig } from "../../../config/dist/index.js";
+import { morphoBlueAbi } from "../../abis/MorphoBlue.ts";
 
 const ERC20_DECIMALS_ABI = [
   { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] },
