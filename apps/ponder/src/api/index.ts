@@ -233,11 +233,14 @@ app.post("/chain/:chainId/marketView", async (c) => {
   } catch (e: any) {
     return c.json({ error: 'rpc_error', message: e?.message ?? String(e) }, 502);
   }
-  const loanToken = (params as any)?.loanToken as Address | undefined;
-  const collateralToken = (params as any)?.collateralToken as Address | undefined;
-  const lltv = (params as any).lltv as bigint;
-  const totalBorrowAssets = (view as any).totalBorrowAssets as bigint;
-  const totalBorrowShares = (view as any).totalBorrowShares as bigint;
+  // viem may return tuples as arrays; access by index for robustness
+  const p = params as readonly [Address, Address, Address, Address, bigint] | any;
+  const v = view as readonly [bigint, bigint, bigint, bigint, bigint, bigint] | any;
+  const loanToken = (Array.isArray(p) ? p[0] : (p?.loanToken)) as Address | undefined;
+  const collateralToken = (Array.isArray(p) ? p[1] : (p?.collateralToken)) as Address | undefined;
+  const lltv = (Array.isArray(p) ? p[4] : (p?.lltv)) as bigint;
+  const totalBorrowAssets = (Array.isArray(v) ? v[2] : (v?.totalBorrowAssets)) as bigint;
+  const totalBorrowShares = (Array.isArray(v) ? v[3] : (v?.totalBorrowShares)) as bigint;
   let loanDec = 18, collDec = 18;
   const isAddr = (a?: string) => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a);
   if (isAddr(loanToken) && isAddr(collateralToken)) {
