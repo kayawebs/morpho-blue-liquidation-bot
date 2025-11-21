@@ -21,9 +21,11 @@ function replaceBigInts<T>(value: T) {
 
 const app = new Hono();
 
-app.use("/", graphql({ db, schema }));
+// Mount GraphQL only under /graphql to avoid intercepting custom routes.
 app.use("/graphql", graphql({ db, schema }));
 app.use("/sql/*", client({ db, schema }));
+
+app.get('/health', (c) => c.json({ ok: true }));
 
 app.post("/chain/:id/withdraw-queue/:address", async (c) => {
   const { id: chainId, address } = c.req.param();
