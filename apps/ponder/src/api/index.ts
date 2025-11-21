@@ -25,8 +25,8 @@ const app = new Hono();
 app.use("/graphql", graphql({ db, schema }));
 app.use("/sql/*", client({ db, schema }));
 
-// Avoid reserved route name "/health" used internally by Ponder.
-app.get('/status', (c) => c.json({ ok: true }));
+// Use a non‑reserved health endpoint name.
+app.get('/healthz', (c) => c.json({ ok: true }));
 
 app.post("/chain/:id/withdraw-queue/:address", async (c) => {
   const { id: chainId, address } = c.req.param();
