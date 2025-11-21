@@ -586,8 +586,9 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     );
   }, 150);
 
-  await fetchCandidates();
-  setInterval(fetchCandidates, CANDIDATE_REFRESH_MS);
+  // 非阻塞加载候选，避免 Ponder API 慢/挂导致后续排序不执行
+  fetchCandidates().catch(() => {});
+  setInterval(() => { fetchCandidates().catch(() => {}); }, CANDIDATE_REFRESH_MS);
   // 风险 Top-N 定时刷新
   await refreshTopRisk();
   setInterval(refreshTopRisk, RISK_REFRESH_MS);
