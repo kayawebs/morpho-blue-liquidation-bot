@@ -129,6 +129,19 @@ async function main() {
   let nextIdx = 0;
   let topRiskBorrowers: Address[] = [];
   let lastRiskSnapshot: { user: Address; riskE18: bigint }[] = [];
+  const diag = {
+    lastError: '' as string | undefined,
+    lastAt: 0,
+    positions: 0,
+    priceOk: false,
+    loanDec: -1,
+    collDec: -1,
+    aggDec: -1,
+    totalBorrowAssets: '0',
+    totalBorrowShares: '0',
+    lltv: '0',
+    topRiskCount: 0,
+  };
 
   async function fetchCandidates(): Promise<void> {
     try {
@@ -233,7 +246,6 @@ async function main() {
   }
 
   async function refreshTopRisk(): Promise<void> {
-    let cachedList: any[] | undefined;
     try {
       const [mParams, mView] = await Promise.all([getMarketParams(), getMarketView()]);
       const lltv = toBigIntOr((mParams as any)?.lltv, 0n);
@@ -245,7 +257,10 @@ async function main() {
       ]);
       const totalBorrowAssets = toBigIntOr((mView as any)?.totalBorrowAssets, 0n);
       const totalBorrowShares = toBigIntOr((mView as any)?.totalBorrowShares, 0n);
-      if (totalBorrowShares === 0n) { topRiskBorrowers = []; return; }
+      diag.loanDec = loanDec; diag.collDec = collDec; diag.lltv = lltv.toString();
+      diag.totalBorrowAssets = totalBorrowAssets.toString();
+      diag.totalBorrowShares = totalBorrowShares.toString();
+      if (totalBorrowShares === 0n) { topRiskBorrowers = []; diag.topRiskCount = 0; diag.positions = 0; diag.priceOk = false; return; }
 
       // Fetch all positions for this market
       const res = await fetch(new URL(`/chain/${MARKET.chainId}/positions`, PONDER_API_URL), {
@@ -257,17 +272,19 @@ async function main() {
       const results = Array.isArray(data?.results) ? data.results : [];
       const entry = results.find((r: any) => (r?.marketId as string)?.toLowerCase?.() === MARKET.marketId.toLowerCase());
       const list = Array.isArray(entry?.positions) ? entry.positions as any[] : [];
-      cachedList = list;
-      if (!Array.isArray(list) || list.length === 0) { topRiskBorrowers = []; return; }
+      diag.positions = list.length;
+      if (!Array.isArray(list) || list.length === 0) { topRiskBorrowers = []; diag.topRiskCount = 0; return; }
 
       const price = await fetchPredictedNow();
-      if (!price || !(price > 0)) { topRiskBorrowers = []; return; }
+      diag.priceOk = !!(price && price > 0);
+      if (!price || !(price > 0)) { topRiskBorrowers = []; diag.topRiskCount = 0; return; }
       // Aggregator decimals assumed 8 by default, attempt to read from feed if needed
       let aggDecimals = 8;
       try {
         const d = (await readContract(publicClient as any, { address: MARKET.aggregator, abi: AGGREGATOR_V2V3_ABI, functionName: 'decimals' })) as number;
         aggDecimals = Number(d);
       } catch {}
+      diag.aggDec = aggDecimals;
 
       const loanScale = pow10(loanDec);
       const collScale = pow10(collDec);
@@ -293,22 +310,17 @@ async function main() {
       items.sort((a, b) => (b.riskE18 > a.riskE18 ? 1 : b.riskE18 < a.riskE18 ? -1 : 0));
       topRiskBorrowers = items.slice(0, RISK_TOP_N).map((x) => x.user);
       lastRiskSnapshot = items.slice(0, 50);
+      diag.topRiskCount = topRiskBorrowers.length;
+      diag.lastError = undefined; diag.lastAt = Date.now();
       if (process.env.WORKER_VERBOSE === '1') {
         console.log(`⚖️ Top risk borrowers updated (N=${topRiskBorrowers.length})`);
       }
     } catch (e) {
-      if (process.env.WORKER_VERBOSE === '1') console.warn('refreshTopRisk error', (e as any)?.message ?? e);
-      // Fallback: 若链上读取失败或预测价缺失，退化为按 borrowShares 排序的 Top-N（粗略但有用）
-      if (cachedList && cachedList.length > 0) {
-        try {
-          const items = cachedList
-            .map((p: any) => ({ user: p.user as Address, borrowShares: toBigIntOr(p.borrowShares, 0n) }))
-            .filter((x) => x.borrowShares > 0n)
-            .sort((a, b) => (b.borrowShares > a.borrowShares ? 1 : b.borrowShares < a.borrowShares ? -1 : 0));
-          topRiskBorrowers = items.slice(0, RISK_TOP_N).map((x) => x.user);
-          lastRiskSnapshot = items.slice(0, 50).map((x) => ({ user: x.user, riskE18: x.borrowShares }));
-        } catch {}
-      }
+      diag.lastError = (e as any)?.message ?? String(e);
+      diag.lastAt = Date.now();
+      topRiskBorrowers = [];
+      diag.topRiskCount = 0;
+      if (process.env.WORKER_VERBOSE === '1') console.warn('refreshTopRisk error', diag.lastError);
     }
   }
 
@@ -578,6 +590,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             p90Ms: Math.round(sim.p(0.9)),
           },
           topRisk: lastRiskSnapshot.slice(0, RISK_TOP_N).map((x) => ({ user: x.user, riskBps: Number((x.riskE18 * 10000n) / 1000000000000000000n) })),
+          diag,
         }));
         return;
       }
