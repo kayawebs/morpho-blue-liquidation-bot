@@ -57,6 +57,11 @@ const chains = Object.fromEntries(
   ]),
 );
 
+// Helpful log to confirm which RPC each chain uses
+for (const cfg of configs) {
+  console.log(`Ponder RPC for ${cfg.chain.name} (${cfg.chain.id}): ${cfg.rpcUrl}`);
+}
+
 export default createConfig({
   ordering: "multichain",
   chains,

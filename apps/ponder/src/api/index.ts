@@ -211,23 +211,39 @@ app.post("/chain/:chainId/marketView", async (c) => {
   const chainId = Number.parseInt(chainIdRaw, 10);
   const publicClient = Object.values(publicClients).find((pc) => pc.chain?.id === chainId);
   if (!publicClient) return c.json({ error: `Unsupported chain ${chainId}` }, 400);
-
   const cfg = chainConfig(chainId);
   const morphoAddr = cfg.morpho.address as Address;
 
-  const [params, view] = await Promise.all([
-    publicClient.readContract({ address: morphoAddr, abi: morphoBlueAbi as any, functionName: 'idToMarketParams', args: [marketId as any] }),
-    publicClient.readContract({ address: morphoAddr, abi: morphoBlueAbi as any, functionName: 'market', args: [marketId as any] }),
-  ]);
+  const TIMEOUT_MS = Number(process.env.PONDER_API_RPC_TIMEOUT ?? '7000');
+  const withTimeout = async <T>(p: Promise<T>): Promise<T> =>
+    await Promise.race([
+      p,
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), TIMEOUT_MS)),
+    ]);
+
+  let params: any, view: any;
+  try {
+    [params, view] = await Promise.all([
+      withTimeout(publicClient.readContract({ address: morphoAddr, abi: morphoBlueAbi as any, functionName: 'idToMarketParams', args: [marketId as any] } as any)),
+      withTimeout(publicClient.readContract({ address: morphoAddr, abi: morphoBlueAbi as any, functionName: 'market', args: [marketId as any] } as any)),
+    ]);
+  } catch (e: any) {
+    return c.json({ error: 'rpc_error', message: e?.message ?? String(e) }, 502);
+  }
   const loanToken = (params as any).loanToken as Address;
   const collateralToken = (params as any).collateralToken as Address;
   const lltv = (params as any).lltv as bigint;
   const totalBorrowAssets = (view as any).totalBorrowAssets as bigint;
   const totalBorrowShares = (view as any).totalBorrowShares as bigint;
-  const [loanDec, collDec] = await Promise.all([
-    publicClient.readContract({ address: loanToken, abi: ERC20_DECIMALS_ABI as any, functionName: 'decimals' }) as Promise<number>,
-    publicClient.readContract({ address: collateralToken, abi: ERC20_DECIMALS_ABI as any, functionName: 'decimals' }) as Promise<number>,
-  ]);
+  let loanDec = 18, collDec = 18;
+  try {
+    [loanDec, collDec] = await Promise.all([
+      withTimeout(publicClient.readContract({ address: loanToken, abi: ERC20_DECIMALS_ABI as any, functionName: 'decimals' }) as Promise<number>),
+      withTimeout(publicClient.readContract({ address: collateralToken, abi: ERC20_DECIMALS_ABI as any, functionName: 'decimals' }) as Promise<number>),
+    ]);
+  } catch (e: any) {
+    // Best-effort decimals; keep defaults
+  }
 
   return c.json(replaceBigInts({ loanToken, collateralToken, lltv, totalBorrowAssets, totalBorrowShares, loanDec, collDec }));
 });
