@@ -128,6 +128,7 @@ async function main() {
   let candidates: Address[] = [];
   let nextIdx = 0;
   let topRiskBorrowers: Address[] = [];
+  let lastRiskSnapshot: { user: Address; riskE18: bigint }[] = [];
 
   async function fetchCandidates(): Promise<void> {
     try {
@@ -283,6 +284,7 @@ async function main() {
       }
       items.sort((a, b) => (b.riskE18 > a.riskE18 ? 1 : b.riskE18 < a.riskE18 ? -1 : 0));
       topRiskBorrowers = items.slice(0, RISK_TOP_N).map((x) => x.user);
+      lastRiskSnapshot = items.slice(0, 50);
       if (process.env.WORKER_VERBOSE === '1') {
         console.log(`⚖️ Top risk borrowers updated (N=${topRiskBorrowers.length})`);
       }
@@ -540,6 +542,12 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           attempts: metrics.attempts,
           onchainFail: metrics.onchainFail,
           success: metrics.success,
+          params: {
+            requestedRepay: REQUESTED_REPAY_USDC.toString(),
+            minProfit: minProfitDefault.toString(),
+            marketId: MARKET.marketId,
+            aggregator: MARKET.aggregator,
+          },
           simulate: {
             enabled: doSimulate,
             count: sim.count,
@@ -550,7 +558,14 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             p50Ms: Math.round(sim.p(0.5)),
             p90Ms: Math.round(sim.p(0.9)),
           },
+          topRisk: lastRiskSnapshot.slice(0, RISK_TOP_N).map((x) => ({ user: x.user, riskBps: Number((x.riskE18 * 10000n) / 1000000000000000000n) })),
         }));
+        return;
+      }
+      if (_req.url?.startsWith('/top-risk')) {
+        const body = lastRiskSnapshot.map((x) => ({ user: x.user, riskE18: x.riskE18.toString() }));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ list: body, topN: RISK_TOP_N }));
         return;
       }
       res.statusCode = 404; res.end('not found');
