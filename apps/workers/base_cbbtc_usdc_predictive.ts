@@ -179,9 +179,13 @@ async function main() {
 
   function toBigIntOr(v: any, d: bigint = 0n): bigint {
     try {
+      if (typeof v === 'string') {
+        // Handle strings like "123" or "123n" (from Ponder replaceBigInts)
+        const s = v.endsWith('n') ? v.slice(0, -1) : v;
+        return BigInt(s);
+      }
       if (typeof v === 'bigint') return v;
       if (typeof v === 'number') return BigInt(Math.trunc(v));
-      if (typeof v === 'string') return BigInt(v);
     } catch {}
     return d;
   }
@@ -249,7 +253,9 @@ async function main() {
       });
       if (!res.ok) return;
       const data = await res.json();
-      const list = (data?.results?.[0]?.positions ?? []) as any[];
+      const results = Array.isArray(data?.results) ? data.results : [];
+      const entry = results.find((r: any) => (r?.marketId as string)?.toLowerCase?.() === MARKET.marketId.toLowerCase());
+      const list = Array.isArray(entry?.positions) ? entry.positions as any[] : [];
       if (!Array.isArray(list) || list.length === 0) { topRiskBorrowers = []; return; }
 
       const price = await fetchPredictedNow();
@@ -269,9 +275,9 @@ async function main() {
       const items: { user: Address; riskE18: bigint }[] = [];
       for (const p of list) {
         const user = p.user as Address;
-        const bShares = BigInt(p.borrowShares as string | number | bigint);
+        const bShares = toBigIntOr(p.borrowShares, 0n);
         if (bShares <= 0n) continue;
-        const collateral = BigInt(p.collateral as string | number | bigint);
+        const collateral = toBigIntOr(p.collateral, 0n);
         // borrowAssets in loan token units
         const borrowAssets = (BigInt(p.borrowShares as any) * totalBorrowAssets) / totalBorrowShares;
         // collateral value in loan units: collateral * priceScaled * 10^loanDec / (10^collDec * 10^aggDec)
