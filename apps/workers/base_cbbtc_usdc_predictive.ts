@@ -137,6 +137,9 @@ async function main() {
     loanDec: -1,
     collDec: -1,
     aggDec: -1,
+    loanToken: '' as string | undefined,
+    collateralToken: '' as string | undefined,
+    oracleFromParams: '' as string | undefined,
     totalBorrowAssets: '0',
     totalBorrowShares: '0',
     lltv: '0',
@@ -251,6 +254,7 @@ async function main() {
       const lltv = toBigIntOr((mParams as any)?.lltv, 0n);
       const loanTokenAddr = (mParams as any)?.loanToken as Address;
       const collateralTokenAddr = (mParams as any)?.collateralToken as Address;
+      const oracleFromParams = (mParams as any)?.oracle as Address | undefined;
       const [loanDec, collDec] = await Promise.all([
         getTokenDecimals(loanTokenAddr),
         getTokenDecimals(collateralTokenAddr),
@@ -260,6 +264,9 @@ async function main() {
       diag.loanDec = loanDec; diag.collDec = collDec; diag.lltv = lltv.toString();
       diag.totalBorrowAssets = totalBorrowAssets.toString();
       diag.totalBorrowShares = totalBorrowShares.toString();
+      diag.loanToken = loanTokenAddr;
+      diag.collateralToken = collateralTokenAddr;
+      diag.oracleFromParams = oracleFromParams;
       if (totalBorrowShares === 0n) { topRiskBorrowers = []; diag.topRiskCount = 0; diag.positions = 0; diag.priceOk = false; return; }
 
       // Fetch all positions for this market
