@@ -232,19 +232,22 @@ app.post("/chain/:chainId/marketView", async (c) => {
   } catch (e: any) {
     return c.json({ error: 'rpc_error', message: e?.message ?? String(e) }, 502);
   }
-  const loanToken = (params as any).loanToken as Address;
-  const collateralToken = (params as any).collateralToken as Address;
+  const loanToken = (params as any)?.loanToken as Address | undefined;
+  const collateralToken = (params as any)?.collateralToken as Address | undefined;
   const lltv = (params as any).lltv as bigint;
   const totalBorrowAssets = (view as any).totalBorrowAssets as bigint;
   const totalBorrowShares = (view as any).totalBorrowShares as bigint;
   let loanDec = 18, collDec = 18;
-  try {
-    [loanDec, collDec] = await Promise.all([
-      withTimeout(publicClient.readContract({ address: loanToken, abi: ERC20_DECIMALS_ABI as any, functionName: 'decimals' }) as Promise<number>),
-      withTimeout(publicClient.readContract({ address: collateralToken, abi: ERC20_DECIMALS_ABI as any, functionName: 'decimals' }) as Promise<number>),
-    ]);
-  } catch (e: any) {
-    // Best-effort decimals; keep defaults
+  const isAddr = (a?: string) => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a);
+  if (isAddr(loanToken) && isAddr(collateralToken)) {
+    try {
+      [loanDec, collDec] = await Promise.all([
+        withTimeout(publicClient.readContract({ address: loanToken as Address, abi: ERC20_DECIMALS_ABI as any, functionName: 'decimals' }) as Promise<number>),
+        withTimeout(publicClient.readContract({ address: collateralToken as Address, abi: ERC20_DECIMALS_ABI as any, functionName: 'decimals' }) as Promise<number>),
+      ]);
+    } catch (e: any) {
+      // Best-effort decimals; keep defaults
+    }
   }
 
   return c.json(replaceBigInts({ loanToken, collateralToken, lltv, totalBorrowAssets, totalBorrowShares, loanDec, collDec }));
