@@ -300,9 +300,11 @@ async function main() {
   const metrics = { sessions: 0, attempts: 0, onchainFail: 0, success: 0 };
   // 模拟统计与耗时埋点（按需开启：WORKER_SIMULATE=1）
   const doSimulate = process.env.WORKER_SIMULATE === '1';
+  const bypassPct = Math.max(0, Math.min(1, Number(process.env.WORKER_BYPASS_SIM_PCT ?? '0')));
   const sim = {
     count: 0,
     blocked: 0,
+    bypassSent: 0,
     durations: [] as number[], // 仅保留最近 500 次
     push(ms: number) {
       this.durations.push(ms);
@@ -429,27 +431,39 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           let hash: `0x${string}`;
           if (doSimulate) {
             sim.count++;
-            const t0 = Date.now();
-            try {
-              const { request } = await (publicClient as any).simulateContract({
+            const doBypass = bypassPct > 0 && Math.random() < bypassPct;
+            if (doBypass) {
+              // 直发（不模拟）
+              hash = await exec.wc.writeContract({
                 address: flashLiquidator,
                 abi: FLASH_LIQUIDATOR_ABI,
-                functionName: 'flashLiquidate',
+                functionName: "flashLiquidate",
                 args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
-                account: exec.wc.account,
               });
-              const t1 = Date.now();
-              sim.push(t1 - t0);
-              hash = await exec.wc.writeContract(request as any);
-            } catch (err: any) {
-              const t1 = Date.now();
-              sim.push(t1 - (t1 - 1)); // 记录一次极短失败，避免 0
-              sim.blocked++;
-              // 模拟被拦截：默认静默，仅在 VERBOSE 下提示
-              if (process.env.WORKER_VERBOSE === '1') {
-                console.warn(`🧪 simulate 拦截 ${borrower}`, err?.shortMessage ?? err?.message ?? err);
+              sim.bypassSent++;
+            } else {
+              const t0 = Date.now();
+              try {
+                const { request } = await (publicClient as any).simulateContract({
+                  address: flashLiquidator,
+                  abi: FLASH_LIQUIDATOR_ABI,
+                  functionName: 'flashLiquidate',
+                  args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
+                  account: exec.wc.account,
+                });
+                const t1 = Date.now();
+                sim.push(t1 - t0);
+                hash = await exec.wc.writeContract(request as any);
+              } catch (err: any) {
+                const t1 = Date.now();
+                sim.push(t1 - (t1 - 1)); // 记录一次极短失败，避免 0
+                sim.blocked++;
+                // 模拟被拦截：默认静默，仅在 VERBOSE 下提示
+                if (process.env.WORKER_VERBOSE === '1') {
+                  console.warn(`🧪 simulate 拦截 ${borrower}`, err?.shortMessage ?? err?.message ?? err);
+                }
+                return; // 被 simulate 拦截则不发送
               }
-              return; // 被 simulate 拦截则不发送
             }
           } else {
             hash = await exec.wc.writeContract({
@@ -530,6 +544,8 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             enabled: doSimulate,
             count: sim.count,
             blocked: sim.blocked,
+            bypassPct,
+            bypassSent: sim.bypassSent,
             avgMs: Math.round(sim.avg()),
             p50Ms: Math.round(sim.p(0.5)),
             p90Ms: Math.round(sim.p(0.9)),
