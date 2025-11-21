@@ -233,6 +233,7 @@ async function main() {
   }
 
   async function refreshTopRisk(): Promise<void> {
+    let cachedList: any[] | undefined;
     try {
       const [mParams, mView] = await Promise.all([getMarketParams(), getMarketView()]);
       const lltv = toBigIntOr((mParams as any)?.lltv, 0n);
@@ -256,6 +257,7 @@ async function main() {
       const results = Array.isArray(data?.results) ? data.results : [];
       const entry = results.find((r: any) => (r?.marketId as string)?.toLowerCase?.() === MARKET.marketId.toLowerCase());
       const list = Array.isArray(entry?.positions) ? entry.positions as any[] : [];
+      cachedList = list;
       if (!Array.isArray(list) || list.length === 0) { topRiskBorrowers = []; return; }
 
       const price = await fetchPredictedNow();
@@ -296,6 +298,17 @@ async function main() {
       }
     } catch (e) {
       if (process.env.WORKER_VERBOSE === '1') console.warn('refreshTopRisk error', (e as any)?.message ?? e);
+      // Fallback: 若链上读取失败或预测价缺失，退化为按 borrowShares 排序的 Top-N（粗略但有用）
+      if (cachedList && cachedList.length > 0) {
+        try {
+          const items = cachedList
+            .map((p: any) => ({ user: p.user as Address, borrowShares: toBigIntOr(p.borrowShares, 0n) }))
+            .filter((x) => x.borrowShares > 0n)
+            .sort((a, b) => (b.borrowShares > a.borrowShares ? 1 : b.borrowShares < a.borrowShares ? -1 : 0));
+          topRiskBorrowers = items.slice(0, RISK_TOP_N).map((x) => x.user);
+          lastRiskSnapshot = items.slice(0, 50).map((x) => ({ user: x.user, riskE18: x.borrowShares }));
+        } catch {}
+      }
     }
   }
 
