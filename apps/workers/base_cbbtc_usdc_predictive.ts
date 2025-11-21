@@ -176,6 +176,17 @@ async function main() {
     return out;
   }
 
+  function toBigIntOr(v: any, d: bigint = 0n): bigint {
+    try {
+      if (typeof v === 'bigint') return v;
+      if (typeof v === 'number') return BigInt(Math.trunc(v));
+      if (typeof v === 'string') return BigInt(v);
+    } catch {}
+    return d;
+  }
+
+  function pow10(n: number): bigint { return 10n ** BigInt(n); }
+
   async function getMarketParams() {
     return readContract(publicClient as any, {
       address: MARKET.morphoAddress,
@@ -219,14 +230,15 @@ async function main() {
   async function refreshTopRisk(): Promise<void> {
     try {
       const [mParams, mView] = await Promise.all([getMarketParams(), getMarketView()]);
-      const lltv = BigInt((mParams as any).lltv as string | number | bigint);
-      const loanTokenAddr = (mParams as any).loanToken as Address;
-      const collateralTokenAddr = (mParams as any).collateralToken as Address;
+      const lltv = toBigIntOr((mParams as any)?.lltv, 0n);
+      const loanTokenAddr = (mParams as any)?.loanToken as Address;
+      const collateralTokenAddr = (mParams as any)?.collateralToken as Address;
       const [loanDec, collDec] = await Promise.all([
         getTokenDecimals(loanTokenAddr),
         getTokenDecimals(collateralTokenAddr),
       ]);
-      const [totalBorrowAssets, totalBorrowShares] = [BigInt((mView as any).totalBorrowAssets), BigInt((mView as any).totalBorrowShares)];
+      const totalBorrowAssets = toBigIntOr((mView as any)?.totalBorrowAssets, 0n);
+      const totalBorrowShares = toBigIntOr((mView as any)?.totalBorrowShares, 0n);
       if (totalBorrowShares === 0n) { topRiskBorrowers = []; return; }
 
       // Fetch all positions for this market
@@ -248,9 +260,10 @@ async function main() {
         aggDecimals = Number(d);
       } catch {}
 
-      const loanScale = BigInt(10 ** loanDec);
-      const collScale = BigInt(10 ** collDec);
-      const priceScale = BigInt(10 ** aggDecimals);
+      const loanScale = pow10(loanDec);
+      const collScale = pow10(collDec);
+      const priceScale = pow10(aggDecimals);
+      const priceScaled = BigInt(Math.round(price * Math.pow(10, aggDecimals)));
 
       const items: { user: Address; riskE18: bigint }[] = [];
       for (const p of list) {
@@ -260,8 +273,8 @@ async function main() {
         const collateral = BigInt(p.collateral as string | number | bigint);
         // borrowAssets in loan token units
         const borrowAssets = (BigInt(p.borrowShares as any) * totalBorrowAssets) / totalBorrowShares;
-        // collateral value in loan units: collateral * price * 10^loanDec / (10^collDec * 10^aggDec)
-        const collValueLoan = (collateral * BigInt(Math.floor(price * 10 ** 0)) * loanScale) / (collScale * priceScale);
+        // collateral value in loan units: collateral * priceScaled * 10^loanDec / (10^collDec * 10^aggDec)
+        const collValueLoan = (collateral * priceScaled * loanScale) / (collScale * priceScale);
         if (collValueLoan === 0n) continue;
         const maxBorrow = (collValueLoan * lltv) / BigInt(1e18);
         if (maxBorrow === 0n) continue;
