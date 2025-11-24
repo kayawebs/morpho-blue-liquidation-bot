@@ -524,9 +524,20 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
   const forceBypass = true;
   console.log(`⚙️ 配置 simulate=${doSimulate} rawSend=always cadenceMs=${WORKER_SPRAY_CADENCE_MS}`);
 
-  // 每个执行器维护一个简单的互斥，避免并发使用相同 nonce
-  const execState: Map<string, { inFlight: boolean }> = new Map();
+  // 每个执行器维护一个简单的互斥 + 本地 nextNonce，避免并发/竞态使用相同 nonce
+  const execState: Map<string, { inFlight: boolean; nextNonce?: bigint }> = new Map();
   for (const ex of executors) execState.set(ex.label, { inFlight: false });
+  // 启动时预取 pending nonce
+  try {
+    await Promise.all(executors.map(async (ex) => {
+      try {
+        const from = ex.wc.account!.address as Address;
+        const n = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
+        const st = execState.get(ex.label)!; st.nextNonce = n;
+        if (process.env.WORKER_VERBOSE === '1') console.log(`🔢 init nonce ${ex.label} pending=${String(n)}`);
+      } catch {}
+    }));
+  } catch {}
 
   async function sendWithNonce(exec: { wc: ReturnType<typeof createWalletClient>; label: string }, to: Address, data: `0x${string}`, gas: bigint, fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }) {
     const st = execState.get(exec.label)!;
@@ -537,18 +548,31 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     st.inFlight = true;
     try {
       sim.rawAttempts++;
-      // 使用 pending nonce，避免“nonce too low”
       const from = exec.wc.account!.address as Address;
-      let nonce = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
+      // 采用本地 nextNonce，缺失时同步 pending
+      let nonce = execState.get(exec.label)!.nextNonce;
+      if (nonce === undefined) {
+        nonce = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
+      }
       try {
-        return await exec.wc.sendTransaction({ to, data, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, nonce });
+        const txHash = await exec.wc.sendTransaction({ to, data, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, nonce });
+        // 成功后自增本地 nextNonce
+        execState.get(exec.label)!.nextNonce = (nonce as bigint) + 1n;
+        return txHash;
       } catch (err: any) {
-        const msg = (err?.shortMessage ?? err?.message ?? '').toString();
-        if (/nonce/i.test(msg) && /low/i.test(msg)) {
-          // 重新获取 nonce 再尝试一次
+        const msg = (err?.shortMessage ?? err?.message ?? '').toString().toLowerCase();
+        if (msg.includes('nonce') && (msg.includes('low') || msg.includes('too low') || msg.includes('high'))) {
+          // 重新同步 pending nonce 后重试一次
           sim.nonceErrors++;
-          nonce = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
-          return await exec.wc.sendTransaction({ to, data, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, nonce });
+          const fresh = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
+          execState.get(exec.label)!.nextNonce = fresh;
+          try {
+            const txHash = await exec.wc.sendTransaction({ to, data, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, nonce: fresh });
+            execState.get(exec.label)!.nextNonce = fresh + 1n;
+            return txHash;
+          } catch (e) {
+            throw e;
+          }
         }
         throw err;
       }
