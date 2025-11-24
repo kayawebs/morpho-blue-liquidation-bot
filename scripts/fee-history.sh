@@ -21,6 +21,11 @@ resp=$(curl -sS -H 'content-type: application/json' \
   --data "{\"id\":1,\"jsonrpc\":\"2.0\",\"method\":\"eth_feeHistory\",\"params\":[${blocks},\"latest\",[10,25,50,75,90]]}" \
   "$rpc")
 
+if [ -z "${resp}" ]; then
+  echo "error: empty response from RPC ($rpc)" >&2
+  exit 1
+fi
+
 # jq program: convert hex wei to decimal, average each percentile across blocks, output gwei
 jq -r '
   def hx:
@@ -32,7 +37,7 @@ jq -r '
          else $c-48               # 0-9
          end)))
     else tonumber end;
-  if (.error // empty) then . else
+  if has("error") then { error: .error } else
   .result.reward
   | transpose
   | { p10: (.[0] | map(hx) | add/length/1e9),
@@ -41,4 +46,3 @@ jq -r '
       p75: (.[3] | map(hx) | add/length/1e9),
       p90: (.[4] | map(hx) | add/length/1e9) }
   end' <<< "$resp"
-
