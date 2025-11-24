@@ -367,6 +367,7 @@ async function main() {
     count: 0,
     blocked: 0,
     bypassSent: 0,
+    rawErrors: 0,
     durations: [] as number[], // 仅保留最近 500 次
     push(ms: number) {
       this.durations.push(ms);
@@ -491,6 +492,8 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
 
   // 喷射频率：默认 200ms，可用 WORKER_SPRAY_CADENCE_MS 覆盖
   const WORKER_SPRAY_CADENCE_MS = Math.max(50, Number(process.env.WORKER_SPRAY_CADENCE_MS ?? '200'));
+  const forceBypass = process.env.WORKER_FORCE_BYPASS === '1';
+  console.log(`⚙️ 配置 simulate=${doSimulate} bypassPct=${bypassPct} forceBypass=${forceBypass} cadenceMs=${WORKER_SPRAY_CADENCE_MS}`);
   setInterval(async () => {
     if (!sprayActive) return;
 
@@ -521,7 +524,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           if (doSimulate) {
             sim.count++;
             const doBypass = bypassPct > 0 && Math.random() < bypassPct;
-            if (doBypass) {
+            if (forceBypass || doBypass) {
               // 直发（不模拟）：使用原始 sendTransaction，避免 viem 预估
               const data = encodeFunctionData({
                 abi: FLASH_LIQUIDATOR_ABI,
@@ -530,8 +533,17 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
               });
               const gasLimit = BigInt(process.env.WORKER_GAS_LIMIT ?? "900000");
               const fees = await currentFees(sprayStartedAt);
-              hash = await exec.wc.sendTransaction({ to: flashLiquidator, data, gas: gasLimit, ...fees });
               sim.bypassSent++;
+              try {
+                hash = await exec.wc.sendTransaction({ to: flashLiquidator, data, gas: gasLimit, ...fees });
+              } catch (err) {
+                // 原始发送被节点拒绝：统计为 rawErrors，并在 VERBOSE 下打印
+                sim.rawErrors++;
+                if (process.env.WORKER_VERBOSE === '1') {
+                  console.warn(`⚠️ raw send 失败 ${borrower}`, (err as any)?.shortMessage ?? (err as any)?.message ?? err);
+                }
+                return; // 该目标跳过后续回执等待
+              }
             } else {
               const t0 = Date.now();
               try {
@@ -637,6 +649,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             minProfit: minProfitDefault.toString(),
             marketId: MARKET.marketId,
             aggregator: MARKET.aggregator,
+            cadenceMs: WORKER_SPRAY_CADENCE_MS,
           },
           simulate: {
             enabled: doSimulate,
@@ -644,9 +657,11 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             blocked: sim.blocked,
             bypassPct,
             bypassSent: sim.bypassSent,
+            rawErrors: sim.rawErrors,
             avgMs: Math.round(sim.avg()),
             p50Ms: Math.round(sim.p(0.5)),
             p90Ms: Math.round(sim.p(0.9)),
+            forceBypass,
           },
           topRisk: lastRiskSnapshot.slice(0, RISK_TOP_N).map((x) => ({ user: x.user, riskBps: Number((x.riskE18 * 10000n) / 1000000000000000000n) })),
           diag,

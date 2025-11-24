@@ -25,6 +25,7 @@ const SPRAY_PRE_MARGIN_SEC = Number(process.env.SCHED_SPRAY_PRE_MARGIN_SEC ?? 45
 const SPRAY_CADENCE_MS = Number(process.env.SCHED_SPRAY_CADENCE_MS ?? 150);
 const SPRAY_MIN_SESSION_SEC = Number(process.env.SCHED_SPRAY_MIN_SESSION_SEC ?? 20);
 const SPRAY_HB_MAX_SESSION_SEC = Number(process.env.SCHED_SPRAY_HB_MAX_SESSION_SEC ?? 60);
+// 0 means "infinite" (only stop on transmit) for deviation sessions
 const SPRAY_DEV_MAX_SESSION_SEC = Number(process.env.SCHED_SPRAY_DEV_MAX_SESSION_SEC ?? 60);
 const SPRAY_COOLDOWN_SEC = Number(process.env.SCHED_SPRAY_COOLDOWN_SEC ?? 5);
 
@@ -353,7 +354,20 @@ async function maybeStartOrStopSpray(feed: { chainId: number; aggregator: string
     sessions[key] = { active: true, reason, startedAtMs: nowMs, cooldownUntilMs: 0 };
     broadcastSpray(key, { action: 'start', feed: key, reason, cadenceMs: SPRAY_CADENCE_MS, startedAt: nowMs });
   }
-  // stop with sticky logic
+  // Deviation stickiness: once started for deviation, keep spraying regardless of condition
+  // until transmit or max session time (if > 0)
+  if (sess.active && sess.reason === 'deviation') {
+    const startedAtMs = sess.startedAtMs ?? nowMs;
+    const elapsedSec = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
+    if (SPRAY_DEV_MAX_SESSION_SEC > 0 && elapsedSec >= SPRAY_DEV_MAX_SESSION_SEC) {
+      sessions[key] = { active: false, cooldownUntilMs: nowMs + SPRAY_COOLDOWN_SEC * 1000 } as any;
+      broadcastSpray(key, { action: 'stop', feed: key, reason: 'dev_timeout' });
+      return;
+    }
+    // else: keep active regardless of "want"
+    return;
+  }
+  // stop with sticky logic for heartbeat
   if (!want && sess.active) {
     const startedAtMs = sess.startedAtMs ?? nowMs;
     const elapsedSec = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
@@ -362,11 +376,6 @@ async function maybeStartOrStopSpray(feed: { chainId: number; aggregator: string
       if (elapsedSec < SPRAY_HB_MAX_SESSION_SEC) return;
       sessions[key] = { active: false, cooldownUntilMs: nowMs + SPRAY_COOLDOWN_SEC * 1000 } as any;
       broadcastSpray(key, { action: 'stop', feed: key, reason: 'hb_timeout' });
-    } else {
-      // Deviation mode: sticky until transmit or dev max session time
-      if (elapsedSec < SPRAY_DEV_MAX_SESSION_SEC) return;
-      sessions[key] = { active: false, cooldownUntilMs: nowMs + SPRAY_COOLDOWN_SEC * 1000 } as any;
-      broadcastSpray(key, { action: 'stop', feed: key, reason: 'dev_timeout' });
     }
   }
 }
