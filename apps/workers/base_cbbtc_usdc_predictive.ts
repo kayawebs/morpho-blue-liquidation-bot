@@ -492,8 +492,8 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
 
   // 喷射频率：默认 200ms，可用 WORKER_SPRAY_CADENCE_MS 覆盖
   const WORKER_SPRAY_CADENCE_MS = Math.max(50, Number(process.env.WORKER_SPRAY_CADENCE_MS ?? '200'));
-  const forceBypass = process.env.WORKER_FORCE_BYPASS === '1';
-  console.log(`⚙️ 配置 simulate=${doSimulate} bypassPct=${bypassPct} forceBypass=${forceBypass} cadenceMs=${WORKER_SPRAY_CADENCE_MS}`);
+  const forceBypass = true;
+  console.log(`⚙️ 配置 simulate=${doSimulate} rawSend=always cadenceMs=${WORKER_SPRAY_CADENCE_MS}`);
   setInterval(async () => {
     if (!sprayActive) return;
 
@@ -519,62 +519,25 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
       targets.slice(0, executors.length).map(async (borrower, idx) => {
         const exec = executors[idx]!;
         try {
-          // 可选：先进行 simulate 并记录耗时；成功则复用 request 发送
+          // 始终直发（不模拟）
           let hash: `0x${string}`;
-          if (doSimulate) {
-            sim.count++;
-            const doBypass = bypassPct > 0 && Math.random() < bypassPct;
-            if (forceBypass || doBypass) {
-              // 直发（不模拟）：使用原始 sendTransaction，避免 viem 预估
-              const data = encodeFunctionData({
-                abi: FLASH_LIQUIDATOR_ABI,
-                functionName: 'flashLiquidate',
-                args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
-              });
-              const gasLimit = BigInt(process.env.WORKER_GAS_LIMIT ?? "900000");
-              const fees = await currentFees(sprayStartedAt);
-              sim.bypassSent++;
-              try {
-                hash = await exec.wc.sendTransaction({ to: flashLiquidator, data, gas: gasLimit, ...fees });
-              } catch (err) {
-                // 原始发送被节点拒绝：统计为 rawErrors，并在 VERBOSE 下打印
-                sim.rawErrors++;
-                if (process.env.WORKER_VERBOSE === '1') {
-                  console.warn(`⚠️ raw send 失败 ${borrower}`, (err as any)?.shortMessage ?? (err as any)?.message ?? err);
-                }
-                return; // 该目标跳过后续回执等待
-              }
-            } else {
-              const t0 = Date.now();
-              try {
-                const { request } = await (publicClient as any).simulateContract({
-                  address: flashLiquidator,
-                  abi: FLASH_LIQUIDATOR_ABI,
-                  functionName: 'flashLiquidate',
-                  args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
-                  account: exec.wc.account,
-                });
-                const t1 = Date.now();
-                sim.push(t1 - t0);
-                hash = await exec.wc.writeContract(request as any);
-              } catch (err: any) {
-                const t1 = Date.now();
-                sim.push(t1 - (t1 - 1)); // 记录一次极短失败，避免 0
-                sim.blocked++;
-                // 模拟被拦截：默认静默，仅在 VERBOSE 下提示
-                if (process.env.WORKER_VERBOSE === '1') {
-                  console.warn(`🧪 simulate 拦截 ${borrower}`, err?.shortMessage ?? err?.message ?? err);
-                }
-                return; // 被 simulate 拦截则不发送
-              }
+          const data = encodeFunctionData({
+            abi: FLASH_LIQUIDATOR_ABI,
+            functionName: 'flashLiquidate',
+            args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
+          });
+          const gasLimit = BigInt(process.env.WORKER_GAS_LIMIT ?? "900000");
+          const fees = await currentFees(sprayStartedAt);
+          sim.bypassSent++;
+          try {
+            hash = await exec.wc.sendTransaction({ to: flashLiquidator, data, gas: gasLimit, ...fees });
+          } catch (err) {
+            // 原始发送被节点拒绝
+            sim.rawErrors++;
+            if (process.env.WORKER_VERBOSE === '1') {
+              console.warn(`⚠️ raw send 失败 ${borrower}`, (err as any)?.shortMessage ?? (err as any)?.message ?? err);
             }
-          } else {
-            hash = await exec.wc.writeContract({
-              address: flashLiquidator,
-              abi: FLASH_LIQUIDATOR_ABI,
-              functionName: "flashLiquidate",
-              args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
-            });
+            return;
           }
           console.log(`⚡ ${exec.label} 清算发送 ${borrower} tx=${hash}`);
           metrics.attempts++;
