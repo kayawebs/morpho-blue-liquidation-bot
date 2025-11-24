@@ -1,6 +1,7 @@
 import { chainConfig } from "../config/dist/index.js";
 import { base } from "viem/chains";
 import { createPublicClient, createWalletClient, http, webSocket, type Address, encodeFunctionData, parseGwei } from "viem";
+import { decodeErrorResult } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import WebSocket from "ws";
 import { createServer } from "http";
@@ -84,6 +85,27 @@ async function main() {
       const bytes = Buffer.from(strHex, 'hex');
       return bytes.toString('utf8');
     } catch { return undefined; }
+  }
+
+  // Try to decode custom errors first (Liquidator), then fall back to Error(string)
+  const LIQ_ERRORS_ABI = [
+    { type: 'error', name: 'NotAuthorized', inputs: [] },
+    { type: 'error', name: 'RoundNotAdvanced', inputs: [ { type: 'uint80', name: 'prev' }, { type: 'uint80', name: 'curr' } ] },
+    { type: 'error', name: 'PositionHealthy', inputs: [] },
+    { type: 'error', name: 'MinProfitNotMet', inputs: [] },
+  ] as const;
+
+  function decodeErrorData(data?: string): { kind: 'custom'|'string'|'unknown'; message?: string; selector?: string } {
+    if (!data || typeof data !== 'string' || !data.startsWith('0x')) return { kind: 'unknown' };
+    const selector = data.slice(0, 10);
+    try {
+      const dec = decodeErrorResult({ abi: LIQ_ERRORS_ABI as any, data: data as `0x${string}` });
+      const name = (dec as any)?.errorName as string | undefined;
+      if (name) return { kind: 'custom', message: name, selector };
+    } catch {}
+    const s = decodeRevertString(data);
+    if (s) return { kind: 'string', message: s, selector };
+    return { kind: 'unknown', selector };
   }
 
   function parseList(key: string): string[] | undefined {
@@ -370,6 +392,7 @@ async function main() {
     bypassSent: 0,
     rawAttempts: 0,
     rawErrors: 0,
+    nonceErrors: 0,
     durations: [] as number[], // 仅保留最近 500 次
     push(ms: number) {
       this.durations.push(ms);
@@ -500,6 +523,39 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
   const WORKER_SPRAY_CADENCE_MS = Math.max(50, Number(process.env.WORKER_SPRAY_CADENCE_MS ?? '200'));
   const forceBypass = true;
   console.log(`⚙️ 配置 simulate=${doSimulate} rawSend=always cadenceMs=${WORKER_SPRAY_CADENCE_MS}`);
+
+  // 每个执行器维护一个简单的互斥，避免并发使用相同 nonce
+  const execState: Map<string, { inFlight: boolean }> = new Map();
+  for (const ex of executors) execState.set(ex.label, { inFlight: false });
+
+  async function sendWithNonce(exec: { wc: ReturnType<typeof createWalletClient>; label: string }, to: Address, data: `0x${string}`, gas: bigint, fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }) {
+    const st = execState.get(exec.label)!;
+    if (st.inFlight) {
+      if (process.env.WORKER_VERBOSE === '1') console.log(`⏸️ skip send (inFlight) ${exec.label}`);
+      return null;
+    }
+    st.inFlight = true;
+    try {
+      sim.rawAttempts++;
+      // 使用 pending nonce，避免“nonce too low”
+      const from = exec.wc.account!.address as Address;
+      let nonce = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
+      try {
+        return await exec.wc.sendTransaction({ to, data, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, nonce });
+      } catch (err: any) {
+        const msg = (err?.shortMessage ?? err?.message ?? '').toString();
+        if (/nonce/i.test(msg) && /low/i.test(msg)) {
+          // 重新获取 nonce 再尝试一次
+          sim.nonceErrors++;
+          nonce = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
+          return await exec.wc.sendTransaction({ to, data, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, nonce });
+        }
+        throw err;
+      }
+    } finally {
+      st.inFlight = false;
+    }
+  }
   async function doSprayTick() {
     if (!sprayActive) return;
 
@@ -537,9 +593,11 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           });
           const gasLimit = BigInt(process.env.WORKER_GAS_LIMIT ?? "900000");
           const fees = await currentFees(sprayStartedAt);
-          sim.bypassSent++; sim.rawAttempts++;
+          sim.bypassSent++;
           try {
-            hash = await exec.wc.sendTransaction({ to: flashLiquidator, data, gas: gasLimit, ...fees });
+            const out = await sendWithNonce(exec, flashLiquidator, data as any, gasLimit, fees);
+            if (!out) return;
+            hash = out as `0x${string}`;
           } catch (err) {
             // 原始发送被节点拒绝
             sim.rawErrors++;
@@ -555,18 +613,21 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             if (rc?.status && String(rc.status) !== 'success') {
               // Best-effort revert reason: re-call at the same block
               let reason: string | undefined;
+              let sel: string | undefined;
               try {
                 const tx = await (publicClient as any).getTransaction({ hash });
                 // This call is expected to revert and throw
                 await (publicClient as any).call({ to: tx.to, data: tx.input, from: tx.from, value: tx.value, gas: tx.gas, blockNumber: rc.blockNumber });
               } catch (err: any) {
                 const raw = (err?.data as string | undefined) || (err?.cause?.data as string | undefined) || (err?.error?.data as string | undefined);
-                reason = decodeRevertString(raw) || (err?.shortMessage as string | undefined) || (err?.message as string | undefined);
+                const dec = decodeErrorData(raw);
+                reason = dec.message || (err?.shortMessage as string | undefined) || (err?.message as string | undefined);
+                sel = dec.selector;
               }
               const line = JSON.stringify({
                 kind: 'onchainFail', chainId: MARKET.chainId, borrower,
                 tx: hash, blockNumber: rc.blockNumber?.toString?.(),
-                gasUsed: rc.gasUsed?.toString?.(), reason,
+                gasUsed: rc.gasUsed?.toString?.(), reason, selector: sel,
                 ts: Date.now(),
               }) + "\n";
               try { await appendFile('out/worker-tx-failures.ndjson', line); } catch {}
@@ -629,8 +690,10 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           raw: {
             attempts: sim.rawAttempts,
             errors: sim.rawErrors,
+            nonceErrors: sim.nonceErrors,
             sent: sim.bypassSent,
             cadenceMs: WORKER_SPRAY_CADENCE_MS,
+            // optional: lastTargets can be undefined if not computed in this scope
           },
           topRisk: lastRiskSnapshot.slice(0, RISK_TOP_N).map((x) => ({ user: x.user, riskBps: Number((x.riskE18 * 10000n) / 1000000000000000000n) })),
           diag,

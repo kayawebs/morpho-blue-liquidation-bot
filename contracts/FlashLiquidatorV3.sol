@@ -128,6 +128,11 @@ library FullMath {
     }
 }
 
+error NotAuthorized();
+error RoundNotAdvanced(uint80 prev, uint80 curr);
+error PositionHealthy();
+error MinProfitNotMet();
+
 contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
     struct Config {
         uint256 closeFactorBps;
@@ -178,7 +183,7 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
     }
 
     modifier onlyAuthorized() {
-        require(msg.sender == owner || msg.sender == authorizedCaller, "not auth");
+        if (msg.sender != owner && msg.sender != authorizedCaller) revert NotAuthorized();
         _;
     }
 
@@ -251,6 +256,8 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         uint80 prevRoundId,
         uint256 minProfitOverride
     ) external onlyAuthorized nonReentrant {
+        // Early oracle gate (fail fast before flash)
+        _enforceOracle(prevRoundId);
         FlashContext memory ctx = _buildContext(borrower, requestedRepay, prevRoundId, minProfitOverride);
         bytes memory data = abi.encode(ctx);
         if (loanIsToken0) {
@@ -294,6 +301,7 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         }
 
         FlashContext memory ctx = abi.decode(data, (FlashContext));
+        // Oracle already enforced at entry; keep here as safety (in case of callback-only entry)
         _enforceOracle(ctx.prevRoundId);
 
         uint256 balanceBefore = loanToken.balanceOf(address(this));
@@ -328,10 +336,7 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         uint256 uniswapFee = loanIsToken0 ? fee0 : fee1;
         uint256 amountOwed = ctx.repayAmount + uniswapFee;
         uint256 balanceAfter = loanToken.balanceOf(address(this));
-        require(
-            balanceAfter >= storedProfitBefore + amountOwed + ctx.minProfit,
-            "min profit"
-        );
+        if (!(balanceAfter >= storedProfitBefore + amountOwed + ctx.minProfit)) revert MinProfitNotMet();
 
         _safeTransfer(loanToken, msg.sender, amountOwed);
         uint256 finalBalance = loanToken.balanceOf(address(this));
@@ -410,7 +415,7 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
             ,
             uint256 updatedAt,
         ) = oracle.latestRoundData();
-        require(roundId > prevRoundId, "stale round");
+        if (roundId <= prevRoundId) revert RoundNotAdvanced(prevRoundId, roundId);
         require(answer > 0, "bad price");
         require(block.timestamp <= updatedAt + config.maxOracleDelay, "oracle stale");
     }
