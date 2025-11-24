@@ -676,8 +676,22 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
       }
       res.statusCode = 404; res.end('not found');
     });
-    const port = Number(process.env.WORKER_METRICS_PORT ?? 48102);
-    srv.listen(port, () => console.log(`📊 Predictive worker metrics on :${port}/metrics`));
+    let basePort = Number(process.env.WORKER_METRICS_PORT ?? 48102);
+    const maxTries = 10;
+    const tryListen = (p: number, remain: number) => {
+      srv.listen(p, () => console.log(`📊 Predictive worker metrics on :${p}/metrics`));
+      srv.on('error', (err: any) => {
+        if (err?.code === 'EADDRINUSE' && remain > 0) {
+          try { srv.close(); } catch {}
+          const next = p + 1;
+          console.warn(`⚠️ metrics port :${p} in use, trying :${next}`);
+          tryListen(next, remain - 1);
+        } else {
+          console.warn(`⚠️ metrics server disabled (${err?.message ?? err})`);
+        }
+      });
+    };
+    tryListen(basePort, maxTries);
   } catch {}
   console.log("✅ 预测型策略已启动（等待 scheduler 推送窗口）");
 }
