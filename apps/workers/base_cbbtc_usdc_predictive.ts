@@ -364,9 +364,10 @@ async function main() {
   const doSimulate = process.env.WORKER_SIMULATE === '1';
   const bypassPct = Math.max(0, Math.min(1, Number(process.env.WORKER_BYPASS_SIM_PCT ?? '0')));
   const sim = {
-    count: 0,
-    blocked: 0,
+    count: 0, // legacy (unused now)
+    blocked: 0, // legacy (unused now)
     bypassSent: 0,
+    rawAttempts: 0,
     rawErrors: 0,
     durations: [] as number[], // 仅保留最近 500 次
     push(ms: number) {
@@ -528,7 +529,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           });
           const gasLimit = BigInt(process.env.WORKER_GAS_LIMIT ?? "900000");
           const fees = await currentFees(sprayStartedAt);
-          sim.bypassSent++;
+          sim.bypassSent++; sim.rawAttempts++;
           try {
             hash = await exec.wc.sendTransaction({ to: flashLiquidator, data, gas: gasLimit, ...fees });
           } catch (err) {
@@ -614,17 +615,11 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             aggregator: MARKET.aggregator,
             cadenceMs: WORKER_SPRAY_CADENCE_MS,
           },
-          simulate: {
-            enabled: doSimulate,
-            count: sim.count,
-            blocked: sim.blocked,
-            bypassPct,
-            bypassSent: sim.bypassSent,
-            rawErrors: sim.rawErrors,
-            avgMs: Math.round(sim.avg()),
-            p50Ms: Math.round(sim.p(0.5)),
-            p90Ms: Math.round(sim.p(0.9)),
-            forceBypass,
+          raw: {
+            attempts: sim.rawAttempts,
+            errors: sim.rawErrors,
+            sent: sim.bypassSent,
+            cadenceMs: WORKER_SPRAY_CADENCE_MS,
           },
           topRisk: lastRiskSnapshot.slice(0, RISK_TOP_N).map((x) => ({ user: x.user, riskBps: Number((x.riskE18 * 10000n) / 1000000000000000000n) })),
           diag,
