@@ -1,6 +1,6 @@
 import { chainConfig } from "../config/dist/index.js";
 import { base } from "viem/chains";
-import { createPublicClient, createWalletClient, http, webSocket, type Address } from "viem";
+import { createPublicClient, createWalletClient, http, webSocket, type Address, encodeFunctionData, parseGwei } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import WebSocket from "ws";
 import { createServer } from "http";
@@ -494,13 +494,16 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             sim.count++;
             const doBypass = bypassPct > 0 && Math.random() < bypassPct;
             if (doBypass) {
-              // 直发（不模拟）
-              hash = await exec.wc.writeContract({
-                address: flashLiquidator,
+              // 直发（不模拟）：使用原始 sendTransaction，避免 viem 预估
+              const data = encodeFunctionData({
                 abi: FLASH_LIQUIDATOR_ABI,
-                functionName: "flashLiquidate",
+                functionName: 'flashLiquidate',
                 args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
               });
+              const gasLimit = BigInt(process.env.WORKER_GAS_LIMIT ?? "900000");
+              const maxPrio = process.env.WORKER_MAX_PRIORITY_GWEI ? parseGwei(process.env.WORKER_MAX_PRIORITY_GWEI as `${number} gwei`) : undefined;
+              const maxFee = process.env.WORKER_MAX_FEE_GWEI ? parseGwei(process.env.WORKER_MAX_FEE_GWEI as `${number} gwei`) : undefined;
+              hash = await exec.wc.sendTransaction({ to: flashLiquidator, data, gas: gasLimit, maxFeePerGas: maxFee, maxPriorityFeePerGas: maxPrio });
               sim.bypassSent++;
             } else {
               const t0 = Date.now();
