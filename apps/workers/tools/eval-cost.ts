@@ -87,8 +87,22 @@ async function main() {
     } catch {}
   }
 
-  const medGasUsed = median(actualGasUsed.length ? actualGasUsed : failsWin.map(f => BigInt(f.gasUsed ?? '0')));
-  const medEffWei = median(actualEffPrice);
+  let medGasUsed = median(actualGasUsed.length ? actualGasUsed : failsWin.map(f => BigInt(f.gasUsed ?? '0')));
+  let medEffWei = median(actualEffPrice);
+  // Fallbacks when no on-chain attempts yet
+  if (medGasUsed === 0n) {
+    const est = BigInt(env('WORKER_EST_GASUSED', '120000'));
+    medGasUsed = est;
+  }
+  if (medEffWei === 0n) {
+    try {
+      const blk = await client.getBlock();
+      const base = blk?.baseFeePerGas ?? 0n;
+      const prioGwei = Number(env('WORKER_PRIORITY_EST_GWEI', '1.5'));
+      const prioWei = BigInt(Math.round(prioGwei * 1e9));
+      medEffWei = base + prioWei;
+    } catch {}
+  }
 
   // Worst-case per session estimation using median values
   const sessions = loadNdjson<NdSess>(sessPath).filter(x => x && x.kind === 'spraySession');
@@ -100,6 +114,14 @@ async function main() {
     const ticks = Math.max(0, Math.floor((durMs ?? 0) / Math.max(1, CADENCE_MS)));
     const attempts = BigInt(ticks * attemptsPerTick);
     worstSessionsCost += attempts * medGasUsed * medEffWei;
+  }
+
+  // If no sessions were found in the window, provide a naive upper-bound estimate using duty cycle
+  if (sessionsWin.length === 0) {
+    const duty = Number(env('WORKER_SPRAY_DUTY', '0.10')); // fraction of time spraying
+    const ticks = Math.floor((HOURS * 3600 * 1000 * duty) / Math.max(1, CADENCE_MS));
+    const attempts = BigInt(ticks * attemptsPerTick);
+    worstSessionsCost = attempts * medGasUsed * medEffWei;
   }
 
   function toEth(x: bigint) { return Number(x) / 1e18; }
@@ -135,4 +157,3 @@ async function main() {
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
-
