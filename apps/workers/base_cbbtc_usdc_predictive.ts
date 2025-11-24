@@ -397,6 +397,10 @@ async function main() {
           sprayStartedAt = Number(msg.startedAt ?? Date.now());
           metrics.sessions++;
           console.log(`🚨 进入喷射模式 reason=${sprayReason} cadence=${msg.cadenceMs ?? 200}ms`);
+          // 立即尝试一次，避免短会话在下一拍前结束
+          try { await doSprayTick(); } catch {}
+          // 再补一拍，提升命中率
+          setTimeout(() => { if (sprayActive) { doSprayTick().catch(() => {}); } }, Math.max(50, Math.floor(WORKER_SPRAY_CADENCE_MS / 3)));
         } else if (msg.action === 'stop') {
           const endedBy = msg.reason;
           const roundId = msg.roundId;
@@ -495,7 +499,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
   const WORKER_SPRAY_CADENCE_MS = Math.max(50, Number(process.env.WORKER_SPRAY_CADENCE_MS ?? '200'));
   const forceBypass = true;
   console.log(`⚙️ 配置 simulate=${doSimulate} rawSend=always cadenceMs=${WORKER_SPRAY_CADENCE_MS}`);
-  setInterval(async () => {
+  async function doSprayTick() {
     if (!sprayActive) return;
 
     const prevRoundId = await getPrevOrCurrentRoundId();
@@ -514,7 +518,10 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
       }
       if (targets.length >= executors.length) break;
     }
-    if (targets.length === 0) return;
+    if (targets.length === 0) {
+      if (process.env.WORKER_VERBOSE === '1') console.log('ℹ️ 本次无可尝试目标（TopN/借款份额过滤后为空）');
+      return;
+    }
 
     await Promise.all(
       targets.slice(0, executors.length).map(async (borrower, idx) => {
@@ -590,7 +597,10 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
         }
       })
     );
-  }, WORKER_SPRAY_CADENCE_MS);
+  }
+
+  // 定时喷射
+  setInterval(() => { doSprayTick().catch(() => {}); }, WORKER_SPRAY_CADENCE_MS);
 
   // 非阻塞加载候选，避免 Ponder API 慢/挂导致后续排序不执行
   fetchCandidates().catch(() => {});
