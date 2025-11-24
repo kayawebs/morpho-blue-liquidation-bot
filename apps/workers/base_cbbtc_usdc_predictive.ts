@@ -676,22 +676,37 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
       }
       res.statusCode = 404; res.end('not found');
     });
-    let basePort = Number(process.env.WORKER_METRICS_PORT ?? 48102);
-    const maxTries = 10;
-    const tryListen = (p: number, remain: number) => {
-      srv.listen(p, () => console.log(`📊 Predictive worker metrics on :${p}/metrics`));
-      srv.on('error', (err: any) => {
-        if (err?.code === 'EADDRINUSE' && remain > 0) {
-          try { srv.close(); } catch {}
-          const next = p + 1;
-          console.warn(`⚠️ metrics port :${p} in use, trying :${next}`);
-          tryListen(next, remain - 1);
-        } else {
-          console.warn(`⚠️ metrics server disabled (${err?.message ?? err})`);
+    const desired = Number(process.env.WORKER_METRICS_PORT ?? 48102);
+    if (desired <= 0) {
+      console.warn('ℹ️ metrics server disabled by WORKER_METRICS_PORT');
+    } else {
+      const maxTries = 10;
+      const tryListen = (p: number, remain: number) => {
+        const onError = (err: any) => {
+          if (err?.code === 'EADDRINUSE' && remain > 0) {
+            const next = p + 1;
+            console.warn(`⚠️ metrics port :${p} in use, trying :${next}`);
+            // cleanup and retry on next tick
+            try { srv.removeListener('error', onError); srv.close(); } catch {}
+            setTimeout(() => tryListen(next, remain - 1), 0);
+          } else {
+            console.warn(`⚠️ metrics server disabled (${err?.message ?? err})`);
+            try { srv.removeListener('error', onError); } catch {}
+          }
+        };
+        // Attach error handler before listen to catch synchronous errors
+        srv.once('error', onError);
+        try {
+          srv.listen(p, () => {
+            try { srv.removeListener('error', onError); } catch {}
+            console.log(`📊 Predictive worker metrics on :${p}/metrics`);
+          });
+        } catch (e: any) {
+          onError(e);
         }
-      });
-    };
-    tryListen(basePort, maxTries);
+      };
+      tryListen(desired, maxTries);
+    }
   } catch {}
   console.log("✅ 预测型策略已启动（等待 scheduler 推送窗口）");
 }
