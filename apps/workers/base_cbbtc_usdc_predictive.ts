@@ -490,7 +490,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     const elapsed = sessionStartMs ? Math.max(0, Math.floor((now - sessionStartMs) / 1000)) : 0;
     const steps = Math.floor(elapsed / Math.max(1, stepSec));
     const prioGwei = Math.min(maxPrioGwei, minPrioGwei + steps * stepGwei);
-    const prio = parseGwei(`${prioGwei} gwei`);
+    const prio = parseGwei(String(prioGwei));
     // cap maxFee to base * 2 + prio (simple cushion)
     const maxFee = base > 0n ? base * 2n + prio : prio * 2n;
     return { maxFeePerGas: maxFee, maxPriorityFeePerGas: prio };
