@@ -123,7 +123,8 @@ async function main() {
   const CANDIDATE_REFRESH_MS = 30_000; // 更频繁地刷新候选
   const CANDIDATE_BATCH = 200; // 一次扫描更多候选以更快命中有债地址
   const RISK_REFRESH_MS = 3_000; // Top-N 风险榜刷新频率
-  const RISK_TOP_N = 5;
+  // Top-N：默认为 1，可用 WORKER_TOP_N 覆盖
+  const RISK_TOP_N = Math.max(1, Number(process.env.WORKER_TOP_N ?? '1'));
   const candidateSet = new Set<string>();
   let candidates: Address[] = [];
   let nextIdx = 0;
@@ -488,6 +489,8 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     return { maxFeePerGas: maxFee, maxPriorityFeePerGas: prio };
   }
 
+  // 喷射频率：默认 200ms，可用 WORKER_SPRAY_CADENCE_MS 覆盖
+  const WORKER_SPRAY_CADENCE_MS = Math.max(50, Number(process.env.WORKER_SPRAY_CADENCE_MS ?? '200'));
   setInterval(async () => {
     if (!sprayActive) return;
 
@@ -611,7 +614,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
         }
       })
     );
-  }, 150);
+  }, WORKER_SPRAY_CADENCE_MS);
 
   // 非阻塞加载候选，避免 Ponder API 慢/挂导致后续排序不执行
   fetchCandidates().catch(() => {});
