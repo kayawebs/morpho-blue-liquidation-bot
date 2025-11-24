@@ -116,6 +116,7 @@ async function main() {
       label: `default(${account.address})`,
     });
   }
+  console.log(`🔱 执行器数量: ${executors.length}`);
 
   // 候选账户（与确认型相同）
   const PONDER_API_URL = "http://localhost:42069";
@@ -599,8 +600,8 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     );
   }
 
-  // 定时喷射
-  setInterval(() => { doSprayTick().catch(() => {}); }, WORKER_SPRAY_CADENCE_MS);
+  // 定时喷射（仅在喷射期 active 时发送）
+  setInterval(() => { if (sprayActive) doSprayTick().catch(() => {}); }, WORKER_SPRAY_CADENCE_MS);
 
   // 非阻塞加载候选，避免 Ponder API 慢/挂导致后续排序不执行
   fetchCandidates().catch(() => {});
