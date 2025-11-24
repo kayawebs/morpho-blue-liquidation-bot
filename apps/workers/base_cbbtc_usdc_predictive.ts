@@ -463,6 +463,31 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
   }
 
   // 主循环：喷射模式下每 150ms 尝试（更激进）
+  // Cache baseFee for a short window to avoid per-tick RPC load
+  let lastFeeAt = 0; let lastBaseFee: bigint | null = null;
+  async function currentFees(sessionStartMs?: number) {
+    const now = Date.now();
+    if (!lastBaseFee || now - lastFeeAt > 1000) {
+      try {
+        const blk = await (publicClient as any).getBlock();
+        lastBaseFee = blk?.baseFeePerGas ?? null;
+        lastFeeAt = now;
+      } catch {}
+    }
+    const base = lastBaseFee ?? 0n;
+    const minPrioGwei = Number(process.env.WORKER_MIN_PRIORITY_GWEI ?? '1.0');
+    const stepGwei = Number(process.env.WORKER_PRIORITY_STEP_GWEI ?? '0.25');
+    const maxPrioGwei = Number(process.env.WORKER_MAX_PRIORITY_GWEI ?? '5.0');
+    const stepSec = Number(process.env.WORKER_FEE_STEP_SEC ?? '2');
+    const elapsed = sessionStartMs ? Math.max(0, Math.floor((now - sessionStartMs) / 1000)) : 0;
+    const steps = Math.floor(elapsed / Math.max(1, stepSec));
+    const prioGwei = Math.min(maxPrioGwei, minPrioGwei + steps * stepGwei);
+    const prio = parseGwei(`${prioGwei} gwei`);
+    // cap maxFee to base * 2 + prio (simple cushion)
+    const maxFee = base > 0n ? base * 2n + prio : prio * 2n;
+    return { maxFeePerGas: maxFee, maxPriorityFeePerGas: prio };
+  }
+
   setInterval(async () => {
     if (!sprayActive) return;
 
@@ -501,9 +526,8 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
                 args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
               });
               const gasLimit = BigInt(process.env.WORKER_GAS_LIMIT ?? "900000");
-              const maxPrio = process.env.WORKER_MAX_PRIORITY_GWEI ? parseGwei(process.env.WORKER_MAX_PRIORITY_GWEI as `${number} gwei`) : undefined;
-              const maxFee = process.env.WORKER_MAX_FEE_GWEI ? parseGwei(process.env.WORKER_MAX_FEE_GWEI as `${number} gwei`) : undefined;
-              hash = await exec.wc.sendTransaction({ to: flashLiquidator, data, gas: gasLimit, maxFeePerGas: maxFee, maxPriorityFeePerGas: maxPrio });
+              const fees = await currentFees(sprayStartedAt);
+              hash = await exec.wc.sendTransaction({ to: flashLiquidator, data, gas: gasLimit, ...fees });
               sim.bypassSent++;
             } else {
               const t0 = Date.now();

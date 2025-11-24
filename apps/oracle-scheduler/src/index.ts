@@ -25,6 +25,7 @@ const SPRAY_PRE_MARGIN_SEC = Number(process.env.SCHED_SPRAY_PRE_MARGIN_SEC ?? 45
 const SPRAY_CADENCE_MS = Number(process.env.SCHED_SPRAY_CADENCE_MS ?? 150);
 const SPRAY_MIN_SESSION_SEC = Number(process.env.SCHED_SPRAY_MIN_SESSION_SEC ?? 20);
 const SPRAY_HB_MAX_SESSION_SEC = Number(process.env.SCHED_SPRAY_HB_MAX_SESSION_SEC ?? 60);
+const SPRAY_DEV_MAX_SESSION_SEC = Number(process.env.SCHED_SPRAY_DEV_MAX_SESSION_SEC ?? 60);
 const SPRAY_COOLDOWN_SEC = Number(process.env.SCHED_SPRAY_COOLDOWN_SEC ?? 5);
 
 function makeFeedKey(chainId: number, agg: string): FeedKey {
@@ -362,10 +363,10 @@ async function maybeStartOrStopSpray(feed: { chainId: number; aggregator: string
       sessions[key] = { active: false, cooldownUntilMs: nowMs + SPRAY_COOLDOWN_SEC * 1000 } as any;
       broadcastSpray(key, { action: 'stop', feed: key, reason: 'hb_timeout' });
     } else {
-      // Deviation mode: require min session before stopping on condition drop
-      if (elapsedSec < SPRAY_MIN_SESSION_SEC) return;
+      // Deviation mode: sticky until transmit or dev max session time
+      if (elapsedSec < SPRAY_DEV_MAX_SESSION_SEC) return;
       sessions[key] = { active: false, cooldownUntilMs: nowMs + SPRAY_COOLDOWN_SEC * 1000 } as any;
-      broadcastSpray(key, { action: 'stop', feed: key, reason: 'timeout' });
+      broadcastSpray(key, { action: 'stop', feed: key, reason: 'dev_timeout' });
     }
   }
 }
