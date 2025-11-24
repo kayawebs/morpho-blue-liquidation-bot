@@ -326,7 +326,7 @@ async function main() {
         if (bShares <= 0n) continue;
         const collateral = toBigIntOr(p.collateral, 0n);
         // borrowAssets in loan token units
-        const borrowAssets = (BigInt(p.borrowShares as any) * totalBorrowAssets) / totalBorrowShares;
+        const borrowAssets = (bShares * totalBorrowAssets) / totalBorrowShares;
         // collateral value in loan units: collateral * priceScaled * 10^loanDec / (10^collDec * 10^aggDec)
         const collValueLoan = (collateral * priceScaled * loanScale) / (collScale * priceScale);
         if (collValueLoan === 0n) continue;
