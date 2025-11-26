@@ -146,8 +146,8 @@ async function main() {
   const CANDIDATE_REFRESH_MS = 30_000; // 更频繁地刷新候选
   const CANDIDATE_BATCH = 200; // 一次扫描更多候选以更快命中有债地址
   const RISK_REFRESH_MS = 3_000; // Top-N 风险榜刷新频率
-  // Top-N：默认为 1，可用 WORKER_TOP_N 覆盖
-  const RISK_TOP_N = Math.max(1, Number(process.env.WORKER_TOP_N ?? '1'));
+  // Top-N：默认 5，可用 WORKER_TOP_N 覆盖（用于评估挑选最佳目标）
+  const RISK_TOP_N = Math.max(1, Number(process.env.WORKER_TOP_N ?? '5'));
   const candidateSet = new Set<string>();
   let candidates: Address[] = [];
   let nextIdx = 0;
@@ -299,6 +299,54 @@ async function main() {
       }
     } catch {}
     return undefined;
+  }
+
+  // Fit summary（误差分布）缓存，降低请求频率
+  let fitSummaryCache: { ts: number; p90AbsBps: number; biasBps: number } | null = null;
+  async function fetchFitSummary(): Promise<{ p90AbsBps: number; biasBps: number } | undefined> {
+    try {
+      const now = Date.now();
+      if (fitSummaryCache && now - fitSummaryCache.ts < 60_000) return { p90AbsBps: fitSummaryCache.p90AbsBps, biasBps: fitSummaryCache.biasBps };
+      const url = new URL(`/oracles/${MARKET.chainId}/${MARKET.aggregator}/fitSummary`, PREDICTOR_URL);
+      url.searchParams.set('limit', '120');
+      const res = await fetch(url);
+      if (!res.ok) return undefined;
+      const data = await res.json();
+      const out = { p90AbsBps: Number(data?.p90AbsBps ?? 10), biasBps: Number(data?.biasMedianBps ?? 0) };
+      fitSummaryCache = { ts: now, ...out } as any;
+      return out;
+    } catch { return undefined; }
+  }
+
+  // 评估单个 borrower 的风险与（保守）利润，返回评分
+  async function assessCandidate(user: Address, opts: { loanDec: number; collDec: number; aggDec: number; lltv: bigint; totalBorrowAssets: bigint; totalBorrowShares: bigint }): Promise<{ score: number; ok: boolean }> {
+    try {
+      const price = await fetchPredictedNow();
+      if (!price || !(price > 0)) return { score: -1, ok: false };
+      const fit = await fetchFitSummary();
+      const errBps = Math.max(5, Number(fit?.p90AbsBps ?? 10));
+      const biasBps = Number(fit?.biasBps ?? 0);
+      const loanScale = pow10(opts.loanDec); const collScale = pow10(opts.collDec); const priceScale = pow10(opts.aggDec);
+      const priceScaled = BigInt(Math.round(price * Math.pow(10, opts.aggDec)));
+
+      // 读取 position
+      const [, bSharesRaw, collateralRaw] = (await readContract(publicClient as any, { address: MARKET.morphoAddress, abi: morphoBlueAbi, functionName: 'position', args: [MARKET.marketId, user] })) as [bigint, bigint, bigint];
+      if (bSharesRaw <= 0n) return { score: -1, ok: false };
+
+      const borrowAssets = (bSharesRaw * opts.totalBorrowAssets) / opts.totalBorrowShares; // in loan units
+      // 保守风控：按不利方向缩小抵押估值（price*(1 - errBps/1e4) - bias）
+      const adjBps = Math.max(0, 10_000 - errBps - Math.abs(biasBps));
+      const priceAdj = (priceScaled * BigInt(adjBps)) / 10_000n;
+      const collValueLoan = (collateralRaw * priceAdj * loanScale) / (collScale * priceScale);
+      if (collValueLoan === 0n) return { score: -1, ok: false };
+      const maxBorrow = (collValueLoan * opts.lltv) / BigInt(1e18);
+      // 风险评分：越大越危险
+      const num = Number(borrowAssets > maxBorrow ? (borrowAssets - maxBorrow) : 0n);
+      const den = Number(borrowAssets === 0n ? 1n : borrowAssets);
+      const score = den > 0 ? num / den : 0;
+      // 假设有风险就 ok（测试阶段接受失败）
+      return { score, ok: score > 0 };
+    } catch { return { score: -1, ok: false }; }
   }
 
   async function refreshTopRisk(): Promise<void> {
@@ -587,22 +635,23 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
 
     const batch = pickBatch();
     if (batch.length === 0) return;
+    // 评估 Top-N，选择评分最高的 up to executors 个
+    const candScores: { user: Address; score: number }[] = [];
+    for (const u of batch) {
+      const r = await assessCandidate(u, { loanDec: diag.loanDec, collDec: diag.collDec, aggDec: diag.aggDec, lltv: BigInt(diag.lltv), totalBorrowAssets: BigInt(diag.totalBorrowAssets), totalBorrowShares: BigInt(diag.totalBorrowShares) });
+      candScores.push({ user: u, score: r.score });
+    }
+    candScores.sort((a, b) => (b.score > a.score ? 1 : b.score < a.score ? -1 : 0));
+    const chosen: Address[] = candScores.slice(0, Math.min(executors.length, candScores.length)).map(x => x.user);
     const targets: Address[] = [];
-    for (const candidate of batch) {
+    for (const u of chosen) {
       try {
-        const shares = await fetchBorrowShares(candidate);
-        if (shares > 0n) {
-          targets.push(candidate);
-        }
-      } catch (err) {
-        console.warn("⚠️ fetch position failed", candidate, err);
-      }
+        const shares = await fetchBorrowShares(u);
+        if (process.env.WORKER_SKIP_SHARES_FILTER === '1' || shares > 0n) targets.push(u);
+      } catch {}
       if (targets.length >= executors.length) break;
     }
-    if (targets.length === 0) {
-      if (process.env.WORKER_VERBOSE === '1') console.log('ℹ️ 本次无可尝试目标（TopN/借款份额过滤后为空）');
-      return;
-    }
+    if (targets.length === 0) { if (process.env.WORKER_VERBOSE === '1') console.log('ℹ️ 本次无可尝试目标（TopN/借款份额过滤后为空）'); return; }
 
     await Promise.all(
       targets.slice(0, executors.length).map(async (borrower, idx) => {
