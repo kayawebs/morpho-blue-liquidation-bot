@@ -37,6 +37,13 @@ const FLASH_LIQUIDATOR_ABI = [
     stateMutability: "nonpayable",
     type: "function",
   },
+  {
+    inputs: [],
+    name: "lastRoundIdStored",
+    outputs: [{ internalType: "uint80", name: "", type: "uint80" }],
+    stateMutability: "view",
+    type: "function",
+  },
 ] as const;
 
 // Liquidator events (for spray control)
@@ -498,7 +505,8 @@ async function main() {
   });
   ws.on("close", () => console.log("⚠️ scheduler WS 断开，等待重连(由系统自动)"));
   ws.on("error", () => {});
-let lastRoundId: bigint | null = null;
+  let lastRoundId: bigint | null = null;
+  let pendingAdvanceRound: bigint | null = null;
 const REQUESTED_REPAY_USDC: bigint = 50_000_000n; // 50 USDC in 6 decimals
 
 async function getPrevOrCurrentRoundId(): Promise<bigint> {
@@ -642,6 +650,29 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     tickInFlight = true;
 
     const prevRoundId = await getPrevOrCurrentRoundId();
+    // Preflight: if on-chain gate already advanced & stored, stop spray immediately
+    try {
+      const [curr, stored] = await Promise.all([
+        (async () => {
+          const rd = (await readContract(publicClient as any, { address: FEED_PROXY, abi: AGGREGATOR_V2V3_ABI, functionName: 'latestRoundData' })) as [bigint, bigint, bigint, bigint, bigint];
+          return BigInt(rd[0]);
+        })(),
+        (async () => {
+          const v = (await readContract(publicClient as any, { address: flashLiquidator, abi: FLASH_LIQUIDATOR_ABI as any, functionName: 'lastRoundIdStored' })) as bigint;
+          return BigInt(v);
+        })(),
+      ]);
+      if (stored >= curr) {
+        if (sprayActive) { sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined; console.log(`🛑 退出喷射模式 reason=preflight-gate curr=${curr} stored=${stored}`); }
+        tickInFlight = false; return;
+      }
+      // If we already sent for this curr round, do not spam more until storage catches up
+      if (pendingAdvanceRound !== null && pendingAdvanceRound === curr) {
+        // schedule a quick recheck and return
+        setTimeout(() => { if (sprayActive) doSprayTick().catch(() => {}); }, Math.max(50, Math.floor(WORKER_SPRAY_CADENCE_MS / 2)));
+        tickInFlight = false; return;
+      }
+    } catch {}
 
     const batch = pickBatch();
     if (batch.length === 0) return;
@@ -689,6 +720,11 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             const out = await sendWithNonce(exec, flashLiquidator, data as any, gasLimit, fees);
             if (!out) return;
             hash = out as `0x${string}`;
+            // Mark that we have fired for the current round; prevents duplicate bursts until storage updates
+            try {
+              const rd = (await readContract(publicClient as any, { address: FEED_PROXY, abi: AGGREGATOR_V2V3_ABI, functionName: 'latestRoundData' })) as [bigint, bigint, bigint, bigint, bigint];
+              pendingAdvanceRound = BigInt(rd[0]);
+            } catch {}
           } catch (err) {
             // 原始发送被节点拒绝
             sim.rawErrors++;

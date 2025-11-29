@@ -73,19 +73,8 @@ async function compileViaSolc(): Promise<Artifact> {
   return { abi: contract.abi as any[], bytecode };
 }
 
+// Always compile to avoid deploying stale artifacts. Keeps a copy under out/ for inspection.
 async function loadArtifact(): Promise<Artifact> {
-  const outPath = path.join(process.cwd(), "out", `${CONTRACT_NAME}.sol`, `${CONTRACT_NAME}.json`);
-  if (fs.existsSync(outPath)) {
-    return JSON.parse(fs.readFileSync(outPath, "utf8"));
-  }
-  const hhPath = path.join(process.cwd(), "artifacts", "contracts", `${CONTRACT_NAME}.sol`, `${CONTRACT_NAME}.json`);
-  if (fs.existsSync(hhPath)) {
-    const raw = JSON.parse(fs.readFileSync(hhPath, "utf8"));
-    const abi = raw.abi;
-    const bytecode = (raw.bytecode ?? raw.evmbitecode ?? raw.deployedBytecode ?? raw.bytecode?.object) as Hex;
-    if (!abi || !bytecode) throw new Error("hardhat artifact missing abi/bytecode");
-    return { abi, bytecode };
-  }
   return compileViaSolc();
 }
 

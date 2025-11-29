@@ -279,12 +279,13 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
             return; // no-op
         }
         if (answer <= 0) return;
-
-        // Early position health check: if healthy given current oracle answer, no need to flash
-        if (!_wouldBeLiquidatable(borrower, uint256(answer))) return;
+        // Record oracle advancement immediately so subsequent sprays for this round stop,
+        // regardless of health outcome (gas-saving and convergence of spray window).
         uint80 prevStored = lastRoundIdStored;
         lastRoundIdStored = currRound;
         emit OracleAdvanced(prevStored, currRound);
+        // Early position health check: if healthy under current answer, stop here.
+        if (!_wouldBeLiquidatable(borrower, uint256(answer))) return;
         FlashContext memory ctx = _buildContext(borrower, requestedRepay, prevRoundId, minProfitOverride);
         bytes memory data = abi.encode(ctx);
         if (loanIsToken0) {
