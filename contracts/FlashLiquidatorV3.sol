@@ -14,6 +14,10 @@ interface IAggregatorV3 {
         );
 }
 
+interface IAggregatorV3Ext is IAggregatorV3 {
+    function decimals() external view returns (uint8);
+}
+
 interface IERC20 {
     function balanceOf(address) external view returns (uint256);
     function transfer(address, uint256) external returns (bool);
@@ -137,7 +141,6 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
     struct Config {
         uint256 closeFactorBps;
         uint256 minProfit;
-        uint256 maxOracleDelay;
     }
 
     struct FlashContext {
@@ -224,7 +227,7 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         require(collateralIsToken0 || pool.token1() == _collateralToken, "pool coll");
 
         authorizedCaller = _authorizedCaller;
-        config = Config({ closeFactorBps: 5_000, minProfit: 1e5, maxOracleDelay: 600 });
+        config = Config({ closeFactorBps: 5_000, minProfit: 1e5 });
 
         _safeApprove(loanToken, _morpho, type(uint256).max);
     }
@@ -260,12 +263,12 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         uint80 prevRoundId,
         uint256 minProfitOverride
     ) external onlyAuthorized nonReentrant {
-        // Early oracle gate (fail fast before flash). If oracle hasn't advanced, return to save gas.
+        // Early oracle & health gates (fail fast before flash). If not advanced or healthy, return to save gas.
         (
             uint80 currRound,
             int256 answer,
             ,
-            uint256 updatedAt,
+            ,
         ) = oracle.latestRoundData();
         // Optional client hint: if provided prevRoundId and oracle hasn't advanced beyond it, skip
         if (prevRoundId != 0 && currRound <= prevRoundId) {
@@ -275,8 +278,10 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         if (currRound <= lastRoundIdStored) {
             return; // no-op
         }
-        require(answer > 0, "bad price");
-        require(block.timestamp <= updatedAt + config.maxOracleDelay, "oracle stale");
+        if (answer <= 0) return;
+
+        // Early position health check: if healthy given current oracle answer, no need to flash
+        if (!_wouldBeLiquidatable(borrower, uint256(answer))) return;
         uint80 prevStored = lastRoundIdStored;
         lastRoundIdStored = currRound;
         emit OracleAdvanced(prevStored, currRound);
@@ -309,16 +314,15 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
             uint80 currRound,
             int256 answer,
             ,
-            uint256 updatedAt,
+            ,
         ) = oracle.latestRoundData();
         if (prevRoundId != 0 && currRound <= prevRoundId) return;
         if (currRound <= lastRoundIdStored) return;
         require(answer > 0, "bad price");
-        require(block.timestamp <= updatedAt + config.maxOracleDelay, "oracle stale");
         uint80 prevStored = lastRoundIdStored;
         lastRoundIdStored = currRound;
         emit OracleAdvanced(prevStored, currRound);
-        emit Dbg("oracle_ok", currRound, updatedAt);
+        emit Dbg("oracle_ok", currRound, 0);
     }
 
     function uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata data) external override {
@@ -335,16 +339,7 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         }
 
         FlashContext memory ctx = abi.decode(data, (FlashContext));
-        // Oracle already enforced & recorded at entry; keep a lightweight safety
-        (
-            uint80 roundId,
-            int256 answer,
-            ,
-            uint256 updatedAt,
-        ) = oracle.latestRoundData();
-        require(answer > 0, "bad price");
-        require(block.timestamp <= updatedAt + config.maxOracleDelay, "oracle stale");
-        require(roundId >= lastRoundIdStored, "oracle regressed");
+        // Oracle already enforced & recorded at entry; skip re-checks to avoid gas + revert risk.
 
         uint256 balanceBefore = loanToken.balanceOf(address(this));
         require(balanceBefore >= ctx.repayAmount, "flash missing");
@@ -448,6 +443,42 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         int256 amountSpecified = int256(amountIn);
         uint160 limit = zeroForOne ? MIN_SQRT_RATIO_PLUS : MAX_SQRT_RATIO_MINUS;
         pool.swap(address(this), zeroForOne, amountSpecified, limit, "");
+    }
+
+    function _wouldBeLiquidatable(address borrower, uint256 priceAnswer) internal view returns (bool) {
+        // Read market totals & position
+        (
+            ,
+            ,
+            uint128 totalBorrowAssets,
+            uint128 totalBorrowShares,
+            ,
+        ) = morpho.market(marketId);
+        if (totalBorrowShares == 0) return false;
+        (, uint128 borrowerShares, uint128 collateral) = morpho.position(marketId, borrower);
+        if (borrowerShares == 0) return false;
+
+        // Convert shares to assets
+        uint256 debtAssets = _sharesToAssets(totalBorrowAssets, totalBorrowShares, borrowerShares);
+
+        // Resolve decimals: loan, collateral, oracle
+        uint8 loanDec = IERC20(address(loanToken)).decimals();
+        uint8 collDec = IERC20(address(collateralToken)).decimals();
+        uint8 pdec = 8;
+        // best-effort fetch; if it fails, assume 8
+        try IAggregatorV3Ext(address(oracle)).decimals() returns (uint8 d) { pdec = d; } catch {}
+
+        // collateral value in loan units: collateral * price * 10^loanDec / (10^collDec * 10^pdec)
+        uint256 loanScale = 10 ** uint256(loanDec);
+        uint256 collScale = 10 ** uint256(collDec);
+        uint256 priceScale = 10 ** uint256(pdec);
+        uint256 collValueLoan = FullMath.mulDiv(uint256(collateral), priceAnswer, 1);
+        collValueLoan = FullMath.mulDiv(collValueLoan, loanScale, collScale);
+        collValueLoan = FullMath.mulDiv(collValueLoan, 1, priceScale);
+
+        // Healthy if debt <= collValue * lltv
+        uint256 maxBorrow = FullMath.mulDiv(collValueLoan, marketParams.lltv, 1e18);
+        return debtAssets > maxBorrow;
     }
 
     // Deprecated: retained for source compatibility; no longer used.

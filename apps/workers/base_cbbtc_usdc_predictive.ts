@@ -679,7 +679,8 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           const data = encodeFunctionData({
             abi: FLASH_LIQUIDATOR_ABI,
             functionName: 'flashLiquidate',
-            args: [borrower, REQUESTED_REPAY_USDC, prevRoundId, minProfitDefault],
+            // prevRoundId 设为 0，完全依赖合约内 lastRoundIdStored 门控
+            args: [borrower, REQUESTED_REPAY_USDC, 0n, minProfitDefault],
           });
           const gasLimit = BigInt(process.env.WORKER_GAS_LIMIT ?? "900000");
           const fees = await currentFees(sprayStartedAt);
