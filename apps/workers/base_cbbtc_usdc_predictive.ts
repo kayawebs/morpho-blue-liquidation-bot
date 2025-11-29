@@ -1,7 +1,7 @@
 import { chainConfig } from "../config/dist/index.js";
 import { base } from "viem/chains";
 import { createPublicClient, createWalletClient, http, webSocket, type Address, encodeFunctionData, parseGwei } from "viem";
-import { decodeErrorResult } from "viem";
+import { decodeErrorResult, decodeEventLog } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import WebSocket from "ws";
 import { createServer } from "http";
@@ -37,6 +37,11 @@ const FLASH_LIQUIDATOR_ABI = [
     stateMutability: "nonpayable",
     type: "function",
   },
+] as const;
+
+// Liquidator events (for spray control)
+const LIQ_EVENTS_ABI = [
+  { type: 'event', name: 'OracleAdvanced', inputs: [ { type: 'uint80', name: 'prev', indexed: false }, { type: 'uint80', name: 'curr', indexed: false } ] },
 ] as const;
 
 const ERC20_DECIMALS_ABI = [
@@ -581,7 +586,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
       try {
         const from = ex.wc.account!.address as Address;
         const n = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
-        const st = execState.get(ex.label)!; st.nextNonce = n;
+        const st = execState.get(ex.label)!; st.nextNonce = BigInt(n);
         if (process.env.WORKER_VERBOSE === '1') console.log(`🔢 init nonce ${ex.label} pending=${String(n)}`);
       } catch {}
     }));
@@ -600,7 +605,8 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
       // 采用本地 nextNonce，缺失时同步 pending
       let nonce = execState.get(exec.label)!.nextNonce;
       if (nonce === undefined) {
-        nonce = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
+        const n = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
+        nonce = BigInt(n);
       }
       try {
         const txHash = await exec.wc.sendTransaction({ to, data, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, nonce });
@@ -612,7 +618,8 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
         if (msg.includes('nonce') && (msg.includes('low') || msg.includes('too low') || msg.includes('high'))) {
           // 重新同步 pending nonce 后重试一次
           sim.nonceErrors++;
-          const fresh = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
+          const freshN = await (publicClient as any).getTransactionCount({ address: from, blockTag: 'pending' });
+          const fresh = BigInt(freshN);
           execState.get(exec.label)!.nextNonce = fresh;
           try {
             const txHash = await exec.wc.sendTransaction({ to, data, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, nonce: fresh });
@@ -628,8 +635,11 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
       st.inFlight = false;
     }
   }
+  let tickInFlight = false;
   async function doSprayTick() {
     if (!sprayActive) return;
+    if (tickInFlight) return; // avoid overlapping ticks
+    tickInFlight = true;
 
     const prevRoundId = await getPrevOrCurrentRoundId();
 
@@ -642,6 +652,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
       candScores.push({ user: u, score: r.score });
     }
     candScores.sort((a, b) => (b.score > a.score ? 1 : b.score < a.score ? -1 : 0));
+    const bestScore = candScores.length ? candScores[0]!.score : -1;
     const chosen: Address[] = candScores.slice(0, Math.min(executors.length, candScores.length)).map(x => x.user);
     const targets: Address[] = [];
     for (const u of chosen) {
@@ -651,7 +662,13 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
       } catch {}
       if (targets.length >= executors.length) break;
     }
-    if (targets.length === 0) { if (process.env.WORKER_VERBOSE === '1') console.log('ℹ️ 本次无可尝试目标（TopN/借款份额过滤后为空）'); return; }
+    if (targets.length === 0) {
+      if (process.env.WORKER_VERBOSE === '1') console.log('ℹ️ 本次无可尝试目标（TopN/借款份额过滤后为空）');
+      // still allow dynamic cadence scheduling to re-check quickly if risk is very high
+      scheduleDynamicTick(bestScore);
+      tickInFlight = false;
+      return;
+    }
 
     await Promise.all(
       targets.slice(0, executors.length).map(async (borrower, idx) => {
@@ -683,6 +700,23 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           metrics.attempts++;
           try {
             const rc = await (publicClient as any).waitForTransactionReceipt({ hash });
+            // If our tx observed OracleAdvanced, end spray immediately (we won the gate)
+            try {
+              if (rc && Array.isArray(rc.logs)) {
+                for (const lg of rc.logs as any[]) {
+                  try {
+                    const ev = decodeEventLog({ abi: LIQ_EVENTS_ABI as any, data: lg.data as `0x${string}`, topics: lg.topics as any });
+                    if ((ev as any)?.eventName === 'OracleAdvanced') {
+                      if (sprayActive) {
+                        sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined;
+                        console.log(`🛑 退出喷射模式 reason=oracle-advanced tx=${hash}`);
+                      }
+                      break;
+                    }
+                  } catch {}
+                }
+              }
+            } catch {}
             if (rc?.status && String(rc.status) !== 'success') {
               // Best-effort revert reason: re-call at the same block
               let reason: string | undefined;
@@ -732,10 +766,37 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
         }
       })
     );
+    // schedule an extra quick tick if risk is high
+    scheduleDynamicTick(bestScore);
+    tickInFlight = false;
   }
 
   // 定时喷射（仅在喷射期 active 时发送）
   setInterval(() => { if (sprayActive) doSprayTick().catch(() => {}); }, WORKER_SPRAY_CADENCE_MS);
+
+  // 动态喷射频率：根据最佳风险分数在当前会话内附加更快的 tick
+  const SPRAY_FAST_MS = Math.max(30, Number(process.env.WORKER_SPRAY_FAST_MS ?? '150'));
+  const SPRAY_SUPER_MS = Math.max(20, Number(process.env.WORKER_SPRAY_SUPER_MS ?? '75'));
+  const THR_FAST = Math.max(0, Math.min(1, Number(process.env.WORKER_SPRAY_THR_FAST ?? '0.20')));
+  const THR_SUPER = Math.max(0, Math.min(1, Number(process.env.WORKER_SPRAY_THR_SUPER ?? '0.50')));
+  let lastDynamicAt = 0;
+  let lastBestScore = -1;
+  let dynamicTicks = 0;
+  function scheduleDynamicTick(bestScore: number) {
+    if (!sprayActive) return;
+    lastBestScore = bestScore;
+    const now = Date.now();
+    // Small guard to avoid too dense scheduling
+    const minGap = Math.min(SPRAY_FAST_MS, SPRAY_SUPER_MS) / 2;
+    if (now - lastDynamicAt < minGap) return;
+    let delay = 0;
+    if (bestScore >= THR_SUPER) delay = SPRAY_SUPER_MS;
+    else if (bestScore >= THR_FAST) delay = SPRAY_FAST_MS;
+    else return;
+    lastDynamicAt = now;
+    dynamicTicks++;
+    setTimeout(() => { if (sprayActive) doSprayTick().catch(() => {}); }, delay);
+  }
 
   // 非阻塞加载候选，避免 Ponder API 慢/挂导致后续排序不执行
   fetchCandidates().catch(() => {});
@@ -766,6 +827,14 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             nonceErrors: sim.nonceErrors,
             sent: sim.bypassSent,
             cadenceMs: WORKER_SPRAY_CADENCE_MS,
+            dynamic: {
+              fastMs: SPRAY_FAST_MS,
+              superMs: SPRAY_SUPER_MS,
+              thrFast: THR_FAST,
+              thrSuper: THR_SUPER,
+              lastBestScore,
+              dynamicTicks,
+            },
             // optional: lastTargets can be undefined if not computed in this scope
           },
           topRisk: lastRiskSnapshot.slice(0, RISK_TOP_N).map((x) => ({ user: x.user, riskBps: Number((x.riskE18 * 10000n) / 1000000000000000000n) })),

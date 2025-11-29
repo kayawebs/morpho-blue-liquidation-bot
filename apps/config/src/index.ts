@@ -39,14 +39,18 @@ export function getSecrets(chainId: number, chain?: Chain) {
 
   const rpcUrl = process.env[`RPC_URL_${chainId}`] ?? defaultRpcUrl;
   const wsRpcUrl = process.env[`WS_RPC_URL_${chainId}`];
-  const executorAddress = process.env[`EXECUTOR_ADDRESS_${chainId}`];
+  // Unify to one address: prefer FLASH_LIQUIDATOR_ADDRESS_<chainId>,
+  // but keep backward compatibility with EXECUTOR_ADDRESS_<chainId>.
+  const executorAddress =
+    process.env[`FLASH_LIQUIDATOR_ADDRESS_${chainId}`] ||
+    process.env[`EXECUTOR_ADDRESS_${chainId}`];
   const liquidationPrivateKey = process.env[`LIQUIDATION_PRIVATE_KEY_${chainId}`];
 
   if (!rpcUrl) {
     throw new Error(`No RPC URL found for chainId ${chainId}`);
   }
   if (!executorAddress) {
-    throw new Error(`No executor address found for chainId ${chainId}`);
+    throw new Error(`No liquidator/executor address found for chainId ${chainId}. Set FLASH_LIQUIDATOR_ADDRESS_${chainId}`);
   }
   if (!liquidationPrivateKey) {
     throw new Error(`No liquidation private key found for chainId ${chainId}`);

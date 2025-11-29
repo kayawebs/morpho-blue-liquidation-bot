@@ -33,7 +33,8 @@ async function run() {
 
   const rpcUrl = process.env[`RPC_URL_${chainId}`];
   const privateKey = process.env[`LIQUIDATION_PRIVATE_KEY_${chainId}`];
-  const executorAddress = process.env[`EXECUTOR_ADDRESS_${chainId}`];
+  // Prefer unified FLASH_LIQUIDATOR_ADDRESS_<chainId>, fallback to legacy EXECUTOR_ADDRESS_<chainId>
+  const executorAddress = process.env[`FLASH_LIQUIDATOR_ADDRESS_${chainId}`] ?? process.env[`EXECUTOR_ADDRESS_${chainId}`];
 
   if (!rpcUrl) {
     throw new Error(`RPC_URL_${chainId} is not set`);
@@ -42,7 +43,7 @@ async function run() {
     throw new Error(`LIQUIDATION_PRIVATE_KEY_${chainId} is not set`);
   }
   if (!executorAddress) {
-    throw new Error(`EXECUTOR_ADDRESS_${chainId} is not set`);
+    throw new Error(`FLASH_LIQUIDATOR_ADDRESS_${chainId} is not set`);
   }
 
   const chainConfig = chainConfigs[chainId];

@@ -129,7 +129,7 @@ library FullMath {
 }
 
 error NotAuthorized();
-error RoundNotAdvanced(uint80 prev, uint80 curr);
+// error RoundNotAdvanced(uint80 prev, uint80 curr); // deprecated: we early-return to save gas
 error PositionHealthy();
 error MinProfitNotMet();
 
@@ -171,6 +171,10 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
 
     address public authorizedCaller;
     Config public config;
+    // Stored last observed oracle roundId to avoid unnecessary flash when oracle hasn't advanced.
+    uint80 public lastRoundIdStored;
+
+    event OracleAdvanced(uint80 prev, uint80 curr);
 
     uint256 private _locked = 1;
     // Debug helpers
@@ -256,8 +260,26 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         uint80 prevRoundId,
         uint256 minProfitOverride
     ) external onlyAuthorized nonReentrant {
-        // Early oracle gate (fail fast before flash)
-        _enforceOracle(prevRoundId);
+        // Early oracle gate (fail fast before flash). If oracle hasn't advanced, return to save gas.
+        (
+            uint80 currRound,
+            int256 answer,
+            ,
+            uint256 updatedAt,
+        ) = oracle.latestRoundData();
+        // Optional client hint: if provided prevRoundId and oracle hasn't advanced beyond it, skip
+        if (prevRoundId != 0 && currRound <= prevRoundId) {
+            return; // no-op
+        }
+        // Contract-level stored gate: if not advanced beyond lastRoundIdStored, skip
+        if (currRound <= lastRoundIdStored) {
+            return; // no-op
+        }
+        require(answer > 0, "bad price");
+        require(block.timestamp <= updatedAt + config.maxOracleDelay, "oracle stale");
+        uint80 prevStored = lastRoundIdStored;
+        lastRoundIdStored = currRound;
+        emit OracleAdvanced(prevStored, currRound);
         FlashContext memory ctx = _buildContext(borrower, requestedRepay, prevRoundId, minProfitOverride);
         bytes memory data = abi.encode(ctx);
         if (loanIsToken0) {
@@ -281,10 +303,22 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         _dbgActive = 0;
     }
 
-    // Debug: only test oracle gate
+    // Debug: only test oracle gate; records round if advanced
     function dbgOracle(uint80 prevRoundId) external onlyAuthorized {
-        _enforceOracle(prevRoundId);
-        emit Dbg("oracle_ok", 0, 0);
+        (
+            uint80 currRound,
+            int256 answer,
+            ,
+            uint256 updatedAt,
+        ) = oracle.latestRoundData();
+        if (prevRoundId != 0 && currRound <= prevRoundId) return;
+        if (currRound <= lastRoundIdStored) return;
+        require(answer > 0, "bad price");
+        require(block.timestamp <= updatedAt + config.maxOracleDelay, "oracle stale");
+        uint80 prevStored = lastRoundIdStored;
+        lastRoundIdStored = currRound;
+        emit OracleAdvanced(prevStored, currRound);
+        emit Dbg("oracle_ok", currRound, updatedAt);
     }
 
     function uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata data) external override {
@@ -301,8 +335,16 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         }
 
         FlashContext memory ctx = abi.decode(data, (FlashContext));
-        // Oracle already enforced at entry; keep here as safety (in case of callback-only entry)
-        _enforceOracle(ctx.prevRoundId);
+        // Oracle already enforced & recorded at entry; keep a lightweight safety
+        (
+            uint80 roundId,
+            int256 answer,
+            ,
+            uint256 updatedAt,
+        ) = oracle.latestRoundData();
+        require(answer > 0, "bad price");
+        require(block.timestamp <= updatedAt + config.maxOracleDelay, "oracle stale");
+        require(roundId >= lastRoundIdStored, "oracle regressed");
 
         uint256 balanceBefore = loanToken.balanceOf(address(this));
         require(balanceBefore >= ctx.repayAmount, "flash missing");
@@ -408,17 +450,8 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         pool.swap(address(this), zeroForOne, amountSpecified, limit, "");
     }
 
-    function _enforceOracle(uint80 prevRoundId) internal view {
-        (
-            uint80 roundId,
-            int256 answer,
-            ,
-            uint256 updatedAt,
-        ) = oracle.latestRoundData();
-        if (roundId <= prevRoundId) revert RoundNotAdvanced(prevRoundId, roundId);
-        require(answer > 0, "bad price");
-        require(block.timestamp <= updatedAt + config.maxOracleDelay, "oracle stale");
-    }
+    // Deprecated: retained for source compatibility; no longer used.
+    function _enforceOracle(uint80 /*prevRoundId*/) internal view {}
 
     function _assetsToShares(
         uint256 assets,
