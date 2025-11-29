@@ -442,6 +442,7 @@ async function main() {
   let sprayActive = false;
   let sprayReason: string | undefined;
   let sprayStartedAt: number | undefined;
+  let sessionRound: bigint | null = null; // roundId at session start; stop only when strictly greater
   const metrics = { sessions: 0, attempts: 0, onchainFail: 0, success: 0 };
   // 模拟统计与耗时埋点（按需开启：WORKER_SIMULATE=1）
   const doSimulate = process.env.WORKER_SIMULATE === '1';
@@ -481,6 +482,11 @@ async function main() {
           sprayStartedAt = Number(msg.startedAt ?? Date.now());
           metrics.sessions++;
           console.log(`🚨 进入喷射模式 reason=${sprayReason} cadence=${msg.cadenceMs ?? 200}ms`);
+          // Capture current round at session start for robust stop condition
+          try {
+            const rd = (await readContract(publicClient as any, { address: FEED_PROXY, abi: AGGREGATOR_V2V3_ABI, functionName: 'latestRoundData' })) as [bigint, bigint, bigint, bigint, bigint];
+            sessionRound = BigInt(rd[0]);
+          } catch { sessionRound = null; }
           // 立即尝试一次，避免短会话在下一拍前结束
           try { await doSprayTick(); } catch {}
           // 再补一拍，提升命中率
@@ -494,7 +500,7 @@ async function main() {
             const line = JSON.stringify({ kind: 'spraySession', reason: sprayReason, startedAt: sprayStartedAt, endedAt: Date.now(), endedBy, roundId, transmitTs: ts, durationMs: durMs }) + "\n";
             try { await appendFile('out/worker-sessions.ndjson', line); } catch {}
           }
-          sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined;
+          sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined; sessionRound = null;
           console.log(`🛑 退出喷射模式 reason=${endedBy ?? 'unknown'}`);
         }
       } else if (msg?.data) {
@@ -650,7 +656,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     tickInFlight = true;
 
     const prevRoundId = await getPrevOrCurrentRoundId();
-    // Preflight: if on-chain gate already advanced & stored, stop spray immediately
+    // Preflight: read current aggregator round & last stored to avoid duplicate bursts.
     try {
       const [curr, stored] = await Promise.all([
         (async () => {
@@ -662,10 +668,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           return BigInt(v);
         })(),
       ]);
-      if (stored >= curr) {
-        if (sprayActive) { sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined; console.log(`🛑 退出喷射模式 reason=preflight-gate curr=${curr} stored=${stored}`); }
-        tickInFlight = false; return;
-      }
+      // Do not stop spray based on preflight; only throttle duplicates within the same round.
       // If we already sent for this curr round, do not spam more until storage catches up
       if (pendingAdvanceRound !== null && pendingAdvanceRound === curr) {
         // schedule a quick recheck and return
@@ -744,9 +747,13 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
                   try {
                     const ev = decodeEventLog({ abi: LIQ_EVENTS_ABI as any, data: lg.data as `0x${string}`, topics: lg.topics as any });
                     if ((ev as any)?.eventName === 'OracleAdvanced') {
-                      if (sprayActive) {
-                        sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined;
-                        console.log(`🛑 退出喷射模式 reason=oracle-advanced tx=${hash}`);
+                      const curr = BigInt((ev as any)?.args?.curr ?? 0n);
+                      // Only stop when we observed a newer round than session start
+                      if (sessionRound !== null && curr > sessionRound) {
+                        if (sprayActive) {
+                          sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined; sessionRound = null;
+                          console.log(`🛑 退出喷射模式 reason=oracle-advanced tx=${hash} curr=${curr}`);
+                        }
                       }
                       break;
                     }
