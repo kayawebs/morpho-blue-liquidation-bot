@@ -1,7 +1,7 @@
 import { chainConfig } from "../config/dist/index.js";
 import { base } from "viem/chains";
 import { createPublicClient, createWalletClient, http, webSocket, type Address, encodeFunctionData, parseGwei } from "viem";
-import { decodeErrorResult, decodeEventLog } from "viem";
+import { decodeErrorResult } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import WebSocket from "ws";
 import { createServer } from "http";
@@ -22,7 +22,7 @@ const MARKET = {
   aggregator: "0x852aE0B1Af1aAeDB0fC4428B4B24420780976ca8" as Address,
 };
 // Feed proxy used for prevRoundId reads to match on-chain gating
-const FEED_PROXY = "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F" as Address;
+// (scheduler-only mode) No direct reads from feed proxy here.
 
 const FLASH_LIQUIDATOR_ABI = [
   {
@@ -37,19 +37,8 @@ const FLASH_LIQUIDATOR_ABI = [
     stateMutability: "nonpayable",
     type: "function",
   },
-  {
-    inputs: [],
-    name: "lastRoundIdStored",
-    outputs: [{ internalType: "uint80", name: "", type: "uint80" }],
-    stateMutability: "view",
-    type: "function",
-  },
 ] as const;
-
-// Liquidator events (for spray control)
-const LIQ_EVENTS_ABI = [
-  { type: 'event', name: 'OracleAdvanced', inputs: [ { type: 'uint80', name: 'prev', indexed: false }, { type: 'uint80', name: 'curr', indexed: false } ] },
-] as const;
+// (scheduler-only mode) No event-based spray stop; scheduler controls spray lifecycle.
 
 const ERC20_DECIMALS_ABI = [
   { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] },
@@ -442,7 +431,6 @@ async function main() {
   let sprayActive = false;
   let sprayReason: string | undefined;
   let sprayStartedAt: number | undefined;
-  let sessionRound: bigint | null = null; // roundId at session start; stop only when strictly greater
   const metrics = { sessions: 0, attempts: 0, onchainFail: 0, success: 0 };
   // 模拟统计与耗时埋点（按需开启：WORKER_SIMULATE=1）
   const doSimulate = process.env.WORKER_SIMULATE === '1';
@@ -482,11 +470,6 @@ async function main() {
           sprayStartedAt = Number(msg.startedAt ?? Date.now());
           metrics.sessions++;
           console.log(`🚨 进入喷射模式 reason=${sprayReason} cadence=${msg.cadenceMs ?? 200}ms`);
-          // Capture current round at session start for robust stop condition
-          try {
-            const rd = (await readContract(publicClient as any, { address: FEED_PROXY, abi: AGGREGATOR_V2V3_ABI, functionName: 'latestRoundData' })) as [bigint, bigint, bigint, bigint, bigint];
-            sessionRound = BigInt(rd[0]);
-          } catch { sessionRound = null; }
           // 立即尝试一次，避免短会话在下一拍前结束
           try { await doSprayTick(); } catch {}
           // 再补一拍，提升命中率
@@ -500,7 +483,7 @@ async function main() {
             const line = JSON.stringify({ kind: 'spraySession', reason: sprayReason, startedAt: sprayStartedAt, endedAt: Date.now(), endedBy, roundId, transmitTs: ts, durationMs: durMs }) + "\n";
             try { await appendFile('out/worker-sessions.ndjson', line); } catch {}
           }
-          sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined; sessionRound = null;
+          sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined;
           console.log(`🛑 退出喷射模式 reason=${endedBy ?? 'unknown'}`);
         }
       } else if (msg?.data) {
@@ -511,25 +494,8 @@ async function main() {
   });
   ws.on("close", () => console.log("⚠️ scheduler WS 断开，等待重连(由系统自动)"));
   ws.on("error", () => {});
-  let lastRoundId: bigint | null = null;
-  let pendingAdvanceRound: bigint | null = null;
+  // (scheduler-only mode) No round tracking; rely entirely on scheduler signals
 const REQUESTED_REPAY_USDC: bigint = 50_000_000n; // 50 USDC in 6 decimals
-
-async function getPrevOrCurrentRoundId(): Promise<bigint> {
-  const round = (await readContract(publicClient as any, {
-    address: MARKET.aggregator,
-    abi: AGGREGATOR_V2V3_ABI,
-    functionName: "latestRoundData",
-  })) as [bigint, bigint, bigint, bigint, bigint];
-  const current = BigInt(round[0]);
-  if (lastRoundId !== null && current > lastRoundId) {
-    const prev = lastRoundId;
-    lastRoundId = current;
-    return prev;
-  }
-  if (lastRoundId === null) lastRoundId = current;
-  return current;
-}
 
   async function fetchBorrowShares(user: Address): Promise<bigint> {
     const [, borrowShares] = (await readContract(publicClient as any, {
@@ -541,24 +507,7 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     return borrowShares;
   }
 
-  async function fetchPrevRoundId(): Promise<bigint | null> {
-    const round = (await readContract(publicClient as any, {
-      address: FEED_PROXY,
-      abi: AGGREGATOR_V2V3_ABI,
-      functionName: "latestRoundData",
-    })) as [bigint, bigint, bigint, bigint, bigint];
-    const roundId = BigInt(round[0]);
-    if (lastRoundId === null) {
-      lastRoundId = roundId;
-      return null;
-    }
-    if (roundId <= lastRoundId) {
-      return null;
-    }
-    const prev = lastRoundId;
-    lastRoundId = roundId;
-    return prev;
-  }
+  // (scheduler-only mode) No fetchPrevRoundId; aggregator reads removed
 
   // 主循环：喷射模式下每 150ms 尝试（更激进）
   // Cache baseFee for a short window to avoid per-tick RPC load
@@ -655,30 +604,10 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
     if (tickInFlight) return; // avoid overlapping ticks
     tickInFlight = true;
 
-    const prevRoundId = await getPrevOrCurrentRoundId();
-    // Preflight: read current aggregator round & last stored to avoid duplicate bursts.
-    try {
-      const [curr, stored] = await Promise.all([
-        (async () => {
-          const rd = (await readContract(publicClient as any, { address: FEED_PROXY, abi: AGGREGATOR_V2V3_ABI, functionName: 'latestRoundData' })) as [bigint, bigint, bigint, bigint, bigint];
-          return BigInt(rd[0]);
-        })(),
-        (async () => {
-          const v = (await readContract(publicClient as any, { address: flashLiquidator, abi: FLASH_LIQUIDATOR_ABI as any, functionName: 'lastRoundIdStored' })) as bigint;
-          return BigInt(v);
-        })(),
-      ]);
-      // Do not stop spray based on preflight; only throttle duplicates within the same round.
-      // If we already sent for this curr round, do not spam more until storage catches up
-      if (pendingAdvanceRound !== null && pendingAdvanceRound === curr) {
-        // schedule a quick recheck and return
-        setTimeout(() => { if (sprayActive) doSprayTick().catch(() => {}); }, Math.max(50, Math.floor(WORKER_SPRAY_CADENCE_MS / 2)));
-        tickInFlight = false; return;
-      }
-    } catch {}
+    // (scheduler-only mode) Skip aggregator preflight & lastRoundIdStored checks entirely.
 
     const batch = pickBatch();
-    if (batch.length === 0) return;
+    if (batch.length === 0) { tickInFlight = false; return; }
     // 评估 Top-N，选择评分最高的 up to executors 个
     const candScores: { user: Address; score: number }[] = [];
     for (const u of batch) {
@@ -723,11 +652,6 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
             const out = await sendWithNonce(exec, flashLiquidator, data as any, gasLimit, fees);
             if (!out) return;
             hash = out as `0x${string}`;
-            // Mark that we have fired for the current round; prevents duplicate bursts until storage updates
-            try {
-              const rd = (await readContract(publicClient as any, { address: FEED_PROXY, abi: AGGREGATOR_V2V3_ABI, functionName: 'latestRoundData' })) as [bigint, bigint, bigint, bigint, bigint];
-              pendingAdvanceRound = BigInt(rd[0]);
-            } catch {}
           } catch (err) {
             // 原始发送被节点拒绝
             sim.rawErrors++;
@@ -740,27 +664,6 @@ async function getPrevOrCurrentRoundId(): Promise<bigint> {
           metrics.attempts++;
           try {
             const rc = await (publicClient as any).waitForTransactionReceipt({ hash });
-            // If our tx observed OracleAdvanced, end spray immediately (we won the gate)
-            try {
-              if (rc && Array.isArray(rc.logs)) {
-                for (const lg of rc.logs as any[]) {
-                  try {
-                    const ev = decodeEventLog({ abi: LIQ_EVENTS_ABI as any, data: lg.data as `0x${string}`, topics: lg.topics as any });
-                    if ((ev as any)?.eventName === 'OracleAdvanced') {
-                      const curr = BigInt((ev as any)?.args?.curr ?? 0n);
-                      // Only stop when we observed a newer round than session start
-                      if (sessionRound !== null && curr > sessionRound) {
-                        if (sprayActive) {
-                          sprayActive = false; sprayReason = undefined; sprayStartedAt = undefined; sessionRound = null;
-                          console.log(`🛑 退出喷射模式 reason=oracle-advanced tx=${hash} curr=${curr}`);
-                        }
-                      }
-                      break;
-                    }
-                  } catch {}
-                }
-              }
-            } catch {}
             if (rc?.status && String(rc.status) !== 'success') {
               // Best-effort revert reason: re-call at the same block
               let reason: string | undefined;
