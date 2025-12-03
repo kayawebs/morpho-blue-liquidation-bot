@@ -18,6 +18,10 @@ interface IAggregatorV3Ext is IAggregatorV3 {
     function decimals() external view returns (uint8);
 }
 
+interface IAggregatorV3Answer {
+    function latestAnswer() external view returns (int256);
+}
+
 interface IERC20 {
     function balanceOf(address) external view returns (uint256);
     function transfer(address, uint256) external returns (bool);
@@ -174,10 +178,12 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
 
     address public authorizedCaller;
     Config public config;
-    // Stored last observed oracle roundId to avoid unnecessary flash when oracle hasn't advanced.
+    // Stored last observed oracle roundId (legacy) and price answer (gas-optimized gating)
     uint80 public lastRoundIdStored;
+    int256 public lastAnswerStored;
 
     event OracleAdvanced(uint80 prev, uint80 curr);
+    event AnswerAdvanced(int256 prev, int256 curr);
 
     uint256 private _locked = 1;
     // Debug helpers
@@ -263,29 +269,17 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         uint80 prevRoundId,
         uint256 minProfitOverride
     ) external onlyAuthorized nonReentrant {
-        // Early oracle & health gates (fail fast before flash). If not advanced or healthy, return to save gas.
-        (
-            uint80 currRound,
-            int256 answer,
-            ,
-            ,
-        ) = oracle.latestRoundData();
-        // Optional client hint: if provided prevRoundId and oracle hasn't advanced beyond it, skip
-        if (prevRoundId != 0 && currRound <= prevRoundId) {
-            return; // no-op
-        }
-        // Contract-level stored gate: if not advanced beyond lastRoundIdStored, skip
-        if (currRound <= lastRoundIdStored) {
-            return; // no-op
-        }
-        if (answer <= 0) return;
-        // Record oracle advancement immediately so subsequent sprays for this round stop,
-        // regardless of health outcome (gas-saving and convergence of spray window).
-        uint80 prevStored = lastRoundIdStored;
-        lastRoundIdStored = currRound;
-        emit OracleAdvanced(prevStored, currRound);
-        // Early position health check: if healthy under current answer, stop here.
-        if (!_wouldBeLiquidatable(borrower, uint256(answer))) return;
+        // Oracle gate (read-only on early exit): compare latestAnswer against stored answer.
+        int256 curr = IAggregatorV3Answer(address(oracle)).latestAnswer();
+        if (curr <= 0) return;
+        int256 prev = lastAnswerStored;
+        if (prev == curr) return; // unchanged -> early return, no SSTORE
+        if (prev != 0 && curr > prev) return; // price up -> early return, no SSTORE
+        // price decreased (or first observation): proceed only if liquidatable
+        if (!_wouldBeLiquidatable(borrower, uint256(curr))) return; // healthy -> early return, no SSTORE
+        // Record advancement only when we are about to proceed with the costly path
+        lastAnswerStored = curr;
+        emit AnswerAdvanced(prev, curr);
         FlashContext memory ctx = _buildContext(borrower, requestedRepay, prevRoundId, minProfitOverride);
         bytes memory data = abi.encode(ctx);
         if (loanIsToken0) {
@@ -309,21 +303,15 @@ contract FlashLiquidatorV3 is IUniswapV3FlashCallback, IUniswapV3SwapCallback {
         _dbgActive = 0;
     }
 
-    // Debug: only test oracle gate; records round if advanced
-    function dbgOracle(uint80 prevRoundId) external onlyAuthorized {
-        (
-            uint80 currRound,
-            int256 answer,
-            ,
-            ,
-        ) = oracle.latestRoundData();
-        if (prevRoundId != 0 && currRound <= prevRoundId) return;
-        if (currRound <= lastRoundIdStored) return;
-        require(answer > 0, "bad price");
-        uint80 prevStored = lastRoundIdStored;
-        lastRoundIdStored = currRound;
-        emit OracleAdvanced(prevStored, currRound);
-        emit Dbg("oracle_ok", currRound, 0);
+    // Debug: record answer when advanced
+    function dbgOracle(uint80 /*prevRoundId*/ ) external onlyAuthorized {
+        int256 curr = IAggregatorV3Answer(address(oracle)).latestAnswer();
+        if (curr <= 0) return;
+        int256 prev = lastAnswerStored;
+        if (prev == curr) return;
+        lastAnswerStored = curr;
+        emit AnswerAdvanced(prev, curr);
+        emit Dbg("oracle_ok", uint256(curr), 0);
     }
 
     function uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata data) external override {

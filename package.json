@@ -21,7 +21,10 @@
     "ponder:backfill:auth": "tsx apps/ponder/src/tools/backfill-auth.ts",
     "deploy:guarded": "tsx apps/client/src/deployGuardedLiquidator.ts",
     "deploy:flash": "tsx apps/client/src/deployFlashLiquidator.ts",
-    "predictor:eval": "tsx apps/predictor/src/tools/eval-predictor.ts"
+    "predictor:eval": "tsx apps/predictor/src/tools/eval-predictor.ts",
+    "analyze:spray": "node scripts/compare-transmit-executor.mjs",
+    "analyze:spray:freq": "node scripts/analyze-spray-frequency.mjs",
+    "export:dryrun": "node scripts/export-dryrun-csv.mjs"
   },
   "lint-staged": {
     "*.ts": [

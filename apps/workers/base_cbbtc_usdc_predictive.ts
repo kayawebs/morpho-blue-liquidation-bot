@@ -320,7 +320,14 @@ async function main() {
   }
 
   // 评估单个 borrower 的风险与（保守）利润，返回评分
-  async function assessCandidate(user: Address, opts: { loanDec: number; collDec: number; aggDec: number; lltv: bigint; totalBorrowAssets: bigint; totalBorrowShares: bigint }): Promise<{ score: number; ok: boolean }> {
+  async function assessCandidate(
+    user: Address,
+    opts: { loanDec: number; collDec: number; aggDec: number; lltv: bigint; totalBorrowAssets: bigint; totalBorrowShares: bigint }
+  ): Promise<{
+    score: number; ok: boolean;
+    price?: number; errBps?: number; biasBps?: number;
+    bShares?: bigint; collateral?: bigint; borrowAssets?: bigint; maxBorrow?: bigint;
+  }> {
     try {
       const price = await fetchPredictedNow();
       if (!price || !(price > 0)) return { score: -1, ok: false };
@@ -346,7 +353,7 @@ async function main() {
       const den = Number(borrowAssets === 0n ? 1n : borrowAssets);
       const score = den > 0 ? num / den : 0;
       // 假设有风险就 ok（测试阶段接受失败）
-      return { score, ok: score > 0 };
+      return { score, ok: score > 0, price, errBps, biasBps, bShares: bSharesRaw, collateral: collateralRaw, borrowAssets, maxBorrow };
     } catch { return { score: -1, ok: false }; }
   }
 
@@ -609,14 +616,37 @@ const REQUESTED_REPAY_USDC: bigint = 50_000_000n; // 50 USDC in 6 decimals
     const batch = pickBatch();
     if (batch.length === 0) { tickInFlight = false; return; }
     // 评估 Top-N，选择评分最高的 up to executors 个
-    const candScores: { user: Address; score: number }[] = [];
+    const candInfos: { user: Address; score: number; price?: number; errBps?: number; biasBps?: number; bShares?: bigint; collateral?: bigint; borrowAssets?: bigint; maxBorrow?: bigint }[] = [];
     for (const u of batch) {
       const r = await assessCandidate(u, { loanDec: diag.loanDec, collDec: diag.collDec, aggDec: diag.aggDec, lltv: BigInt(diag.lltv), totalBorrowAssets: BigInt(diag.totalBorrowAssets), totalBorrowShares: BigInt(diag.totalBorrowShares) });
-      candScores.push({ user: u, score: r.score });
+      candInfos.push({ user: u, score: r.score, price: r.price, errBps: r.errBps, biasBps: r.biasBps, bShares: r.bShares, collateral: r.collateral, borrowAssets: r.borrowAssets, maxBorrow: r.maxBorrow });
     }
-    candScores.sort((a, b) => (b.score > a.score ? 1 : b.score < a.score ? -1 : 0));
-    const bestScore = candScores.length ? candScores[0]!.score : -1;
-    const chosen: Address[] = candScores.slice(0, Math.min(executors.length, candScores.length)).map(x => x.user);
+    candInfos.sort((a, b) => (b.score > a.score ? 1 : b.score < a.score ? -1 : 0));
+    const bestScore = candInfos.length ? candInfos[0]!.score : -1;
+    const chosen: Address[] = candInfos.slice(0, Math.min(executors.length, candInfos.length)).map(x => x.user);
+
+    // 风险门控：未达到阈值则不喷射（支持 dry-run 记录）
+    const RISK_GATE = Math.max(0, Math.min(1, Number(process.env.WORKER_RISK_GATE ?? '0')));
+    const DRY_RUN = process.env.WORKER_DRY_RUN === '1';
+    if (bestScore < RISK_GATE) {
+      if (DRY_RUN && candInfos.length > 0) {
+        // 记录一次“跳过喷射”的干跑样本
+        const info = candInfos[0]!;
+        const line = JSON.stringify({
+          kind: 'dryrun-skip', reason: 'risk_gate', ts: Date.now(), riskGate: RISK_GATE,
+          chainId: MARKET.chainId, marketId: MARKET.marketId, aggregator: MARKET.aggregator,
+          score: info.score, borrower: info.user,
+          price: info.price, errBps: info.errBps, biasBps: info.biasBps,
+          bShares: info.bShares?.toString?.(), collateral: info.collateral?.toString?.(),
+          borrowAssets: info.borrowAssets?.toString?.(), maxBorrow: info.maxBorrow?.toString?.(),
+          sprayReason,
+        }) + "\n";
+        try { await appendFile('out/worker-dryrun.ndjson', line); } catch {}
+      }
+      scheduleDynamicTick(bestScore);
+      tickInFlight = false;
+      return;
+    }
     const targets: Address[] = [];
     for (const u of chosen) {
       try {
@@ -628,6 +658,25 @@ const REQUESTED_REPAY_USDC: bigint = 50_000_000n; // 50 USDC in 6 decimals
     if (targets.length === 0) {
       if (process.env.WORKER_VERBOSE === '1') console.log('ℹ️ 本次无可尝试目标（TopN/借款份额过滤后为空）');
       // still allow dynamic cadence scheduling to re-check quickly if risk is very high
+      scheduleDynamicTick(bestScore);
+      tickInFlight = false;
+      return;
+    }
+
+    // Dry-run：记录选择与环境信息，不实际发送
+    if (DRY_RUN) {
+      for (const t of targets) {
+        const info = candInfos.find((x) => x.user === t);
+        const line = JSON.stringify({
+          kind: 'dryrun', ts: Date.now(), chainId: MARKET.chainId, marketId: MARKET.marketId, aggregator: MARKET.aggregator,
+          sprayReason, cadenceMs: WORKER_SPRAY_CADENCE_MS, executors: executors.length,
+          borrower: t, score: info?.score,
+          price: info?.price, errBps: info?.errBps, biasBps: info?.biasBps,
+          bShares: info?.bShares?.toString?.(), collateral: info?.collateral?.toString?.(),
+          borrowAssets: info?.borrowAssets?.toString?.(), maxBorrow: info?.maxBorrow?.toString?.(),
+        }) + "\n";
+        try { await appendFile('out/worker-dryrun.ndjson', line); } catch {}
+      }
       scheduleDynamicTick(bestScore);
       tickInFlight = false;
       return;
@@ -661,50 +710,52 @@ const REQUESTED_REPAY_USDC: bigint = 50_000_000n; // 50 USDC in 6 decimals
             return;
           }
           console.log(`⚡ ${exec.label} 清算发送 ${borrower} tx=${hash}`);
+          // 发送即计入尝试，并在后台等待回执，避免阻塞喷射节奏
           metrics.attempts++;
-          try {
-            const rc = await (publicClient as any).waitForTransactionReceipt({ hash });
-            if (rc?.status && String(rc.status) !== 'success') {
-              // Best-effort revert reason: re-call at the same block
-              let reason: string | undefined;
-              let sel: string | undefined;
-              try {
-                const tx = await (publicClient as any).getTransaction({ hash });
-                // This call is expected to revert and throw
-                await (publicClient as any).call({ to: tx.to, data: tx.input, from: tx.from, value: tx.value, gas: tx.gas, blockNumber: rc.blockNumber });
-              } catch (err: any) {
-                const raw = (err?.data as string | undefined) || (err?.cause?.data as string | undefined) || (err?.error?.data as string | undefined);
-                const dec = decodeErrorData(raw);
-                reason = dec.message || (err?.shortMessage as string | undefined) || (err?.message as string | undefined);
-                sel = dec.selector;
+          (async () => {
+            try {
+              const rc = await (publicClient as any).waitForTransactionReceipt({ hash });
+              if (rc?.status && String(rc.status) !== 'success') {
+                // Best-effort revert reason: re-call at the same block
+                let reason: string | undefined;
+                let sel: string | undefined;
+                try {
+                  const tx = await (publicClient as any).getTransaction({ hash });
+                  // This call is expected to revert and throw
+                  await (publicClient as any).call({ to: tx.to, data: tx.input, from: tx.from, value: tx.value, gas: tx.gas, blockNumber: rc.blockNumber });
+                } catch (err: any) {
+                  const raw = (err?.data as string | undefined) || (err?.cause?.data as string | undefined) || (err?.error?.data as string | undefined);
+                  const dec = decodeErrorData(raw);
+                  reason = dec.message || (err?.shortMessage as string | undefined) || (err?.message as string | undefined);
+                  sel = dec.selector;
+                }
+                const line = JSON.stringify({
+                  kind: 'onchainFail', chainId: MARKET.chainId, borrower,
+                  tx: hash, blockNumber: rc.blockNumber?.toString?.(),
+                  gasUsed: rc.gasUsed?.toString?.(), reason, selector: sel,
+                  ts: Date.now(),
+                }) + "\n";
+                try { await appendFile('out/worker-tx-failures.ndjson', line); } catch {}
+                metrics.onchainFail++;
+                console.warn(`⛔ on-chain revert ${borrower} tx=${hash} gasUsed=${rc.gasUsed?.toString?.()}${reason ? ` reason=${reason}` : ''}`);
+              } else {
+                // Success path
+                const sline = JSON.stringify({
+                  kind: 'onchainSuccess', chainId: MARKET.chainId, borrower,
+                  tx: hash, blockNumber: rc.blockNumber?.toString?.(),
+                  gasUsed: rc.gasUsed?.toString?.(),
+                  ts: Date.now(),
+                }) + "\n";
+                try { await appendFile('out/worker-tx-success.ndjson', sline); } catch {}
+                metrics.success++;
+                console.log(`✅ on-chain success ${borrower} tx=${hash} gasUsed=${rc.gasUsed?.toString?.()}`);
               }
-              const line = JSON.stringify({
-                kind: 'onchainFail', chainId: MARKET.chainId, borrower,
-                tx: hash, blockNumber: rc.blockNumber?.toString?.(),
-                gasUsed: rc.gasUsed?.toString?.(), reason, selector: sel,
-                ts: Date.now(),
-              }) + "\n";
-              try { await appendFile('out/worker-tx-failures.ndjson', line); } catch {}
-              metrics.onchainFail++;
-              console.warn(`⛔ on-chain revert ${borrower} tx=${hash} gasUsed=${rc.gasUsed?.toString?.()}${reason ? ` reason=${reason}` : ''}`);
-            } else {
-              // Success path
-              const sline = JSON.stringify({
-                kind: 'onchainSuccess', chainId: MARKET.chainId, borrower,
-                tx: hash, blockNumber: rc.blockNumber?.toString?.(),
-                gasUsed: rc.gasUsed?.toString?.(),
-                ts: Date.now(),
-              }) + "\n";
-              try { await appendFile('out/worker-tx-success.ndjson', sline); } catch {}
-              metrics.success++;
-              console.log(`✅ on-chain success ${borrower} tx=${hash} gasUsed=${rc.gasUsed?.toString?.()}`);
+            } catch (e) {
+              if (process.env.WORKER_VERBOSE === '1') {
+                console.warn(`waitForTransactionReceipt error tx=${hash}`, (e as any)?.message ?? e);
+              }
             }
-          } catch (e) {
-            // 等待回执阶段错误（如超时），仅在 VERBOSE 下提示
-            if (process.env.WORKER_VERBOSE === '1') {
-              console.warn(`waitForTransactionReceipt error tx=${hash}`, (e as any)?.message ?? e);
-            }
-          }
+          })().catch(() => {});
         } catch (error) {
           // 估算阶段失败或发送被节点拒绝（未广播），默认不刷屏，仅在 VERBOSE 下打印
           if (process.env.WORKER_VERBOSE === '1') {
