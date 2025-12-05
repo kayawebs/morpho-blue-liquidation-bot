@@ -1,6 +1,6 @@
 import { chainConfig, chainConfigs } from "@morpho-blue-liquidation-bot/config";
 import { createConfig, factory } from "ponder";
-import { type AbiEvent, getAbiItem, createPublicClient, http } from "viem";
+import { type AbiEvent, getAbiItem, createPublicClient, http, webSocket } from "viem";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -19,7 +19,10 @@ const latestByChain: Record<string, number> = {};
 
 async function computeLatestHeads() {
   for (const cfg of configs) {
-    const client = createPublicClient({ chain: cfg.chain, transport: http(cfg.rpcUrl) });
+    const transport = cfg.wsRpcUrl
+      ? webSocket(cfg.wsRpcUrl)
+      : http(cfg.rpcUrl, { batch: true, retryCount: 5 });
+    const client = createPublicClient({ chain: cfg.chain, transport });
     const latest = await client.getBlockNumber();
     latestByChain[cfg.chain.name] = Number(latest);
   }
@@ -52,14 +55,17 @@ const chains = Object.fromEntries(
     config.chain.name,
     {
       id: config.chain.id,
-      rpc: config.rpcUrl,
+      // Prefer WS endpoint if provided to improve near-head sync responsiveness.
+      rpc: config.wsRpcUrl ?? config.rpcUrl,
     },
   ]),
 );
 
-// Helpful log to confirm which RPC each chain uses
+// Helpful log to confirm which RPC each chain uses (and whether WS is preferred)
 for (const cfg of configs) {
-  console.log(`Ponder RPC for ${cfg.chain.name} (${cfg.chain.id}): ${cfg.rpcUrl}`);
+  const chosen = cfg.wsRpcUrl ?? cfg.rpcUrl;
+  const mode = cfg.wsRpcUrl ? 'ws' : 'http';
+  console.log(`Ponder RPC for ${cfg.chain.name} (${cfg.chain.id}) [${mode}]: ${chosen}`);
 }
 
 export default createConfig({

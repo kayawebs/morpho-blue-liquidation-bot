@@ -68,7 +68,8 @@ async function main() {
     const env = { ...baseEnv, DATABASE_SCHEMA: schema, PONDER_DB_SCHEMA: schema, PONDER_MIGRATING: '1' };
     await ensureBaseSchema(schema);
     // If schema already has tables, resume from DB (disable fast lookback). Else use configured/default lookback.
-    const hasData = await detectSchemaHasTables(schema);
+    const forceResume = process.env.PONDER_FORCE_RESUME === '1';
+    const hasData = forceResume ? true : await detectSchemaHasTables(schema);
     env.FAST_LOOKBACK_BLOCKS = hasData ? '0' : (process.env.FAST_LOOKBACK_BLOCKS ?? '10000');
     console.log(`Using Ponder schema: ${schema} (hasData=${hasData}, LOOKBACK=${env.FAST_LOOKBACK_BLOCKS})`);
     const child = spawn('npx', ['ponder', 'start'], {
@@ -80,10 +81,20 @@ async function main() {
     const handleConflict = () => {
       if (conflict) return;
       conflict = true;
-      console.error('❌ Schema conflict detected. Please drop the existing schema or set PONDER_DB_SCHEMA to a new name.');
-      console.error(`   Current schema: ${schema}`);
-      try { child.kill('SIGINT'); } catch {}
-      resolveExit(1);
+      const autoRoll = process.env.PONDER_AUTO_ROLL === '1';
+      if (autoRoll) {
+        // Auto-roll to a timestamped schema to avoid manual drop.
+        const rolled = `${schema}_${Math.floor(Date.now() / 1000)}`;
+        console.warn(`⚠️ Schema conflict for '${schema}'. Auto-rolling to '${rolled}'.`);
+        try { child.kill('SIGINT'); } catch {}
+        // Chain a restart with the new schema
+        startWithSchema(rolled).then((code) => resolveExit(code));
+      } else {
+        console.error('❌ Schema conflict detected. Please drop the existing schema or set PONDER_DB_SCHEMA to a new name.');
+        console.error(`   Current schema: ${schema}`);
+        try { child.kill('SIGINT'); } catch {}
+        resolveExit(1);
+      }
     };
     child.stdout.on('data', (d) => {
       const msg = d.toString();
